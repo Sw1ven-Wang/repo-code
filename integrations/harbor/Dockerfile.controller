@@ -1,0 +1,8 @@
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli docker-compose git \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir harbor==0.25.0 litellm==1.109.0.dev2 openai==3.42.0 pytest==9.2.0 pytest-asyncio==1.4.1 \
+    && pip freeze > /opt/requirements-resolved.txt
+ENV PYTHONPATH=/work/project/src LITELLM_LOCAL_MODEL_COST_MAP=true \
+    PYTHONIOENCODING=utf-8 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+WORKDIR /work/project

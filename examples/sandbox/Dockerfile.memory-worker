@@ -1,0 +1,7 @@
+FROM repo-code-native-validation:1.5.1
+RUN python -m pip install --no-cache-dir torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu \
+ && python -m pip install --no-cache-dir sentence-transformers==5.1.2 transformers==4.57.1
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=2 HF_HOME=/tmp/hf
+USER 65534:65534
+WORKDIR /tmp
+ENTRYPOINT ["python", "/app/encoder_worker.py"]

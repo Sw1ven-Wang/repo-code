@@ -1,0 +1,7 @@
+{
+  "retry_policy": {
+    "kind": "config",
+    "max_identical_failures": 2,
+    "require_new_evidence": true
+  }
+}

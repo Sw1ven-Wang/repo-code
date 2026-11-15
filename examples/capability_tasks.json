@@ -1,0 +1,744 @@
+[
+  {
+    "id": "greenfield-parcel-cli",
+    "category": "code_development",
+    "goal": "从空目录创建可运行的标准库 Python 项目 parcelquote。parcelquote/__init__.py 导出 quote(weight_grams, zone, express=False)，返回整数分：local 首500克500分、每额外不足或满500克加200分；remote 首500克900分、每额外500克加400分；express 额外加300分。重量必须为正整数且不能是bool，zone仅local/remote；无效重量/区域抛ValueError。提供 python -m parcelquote WEIGHT ZONE [--express]，成功输出含唯一键cents的JSON；无效参数退出码2。编写并实际运行pytest覆盖边界、异常和CLI，写README使用说明。最后请求外部验收。",
+    "files": {},
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "business",
+          "description": "从空目录创建可运行的标准库 Python 项目 parcelquote。parcelquote/__init__.py 导出 quote(weight_grams, zone, express=False)，返回整数分：local 首500克500分、每额外不足或满500克加200分；remote 首500克900分、每额外500克加400分；express 额外加300分。重量必须为正整数且不能是bool，zone仅local/remote；无效重量/区域抛ValueError。提供 python -m parcelquote WEIGHT ZONE [--express]，成功输出含唯一键cents的JSON；无效参数退出码2。编写并实际运行pytest覆盖边界、异常和CLI，写README使用说明。最后请求外部验收。",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "rates",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "parcelquote",
+            "function": "quote",
+            "cases": [
+              {
+                "id": "minimum",
+                "args": [
+                  1,
+                  "local"
+                ],
+                "expected": 500
+              },
+              {
+                "id": "boundary",
+                "args": [
+                  500,
+                  "remote"
+                ],
+                "expected": 900
+              },
+              {
+                "id": "increment",
+                "args": [
+                  501,
+                  "remote"
+                ],
+                "expected": 1300
+              },
+              {
+                "id": "express",
+                "args": [
+                  1000,
+                  "local",
+                  true
+                ],
+                "expected": 1000
+              },
+              {
+                "id": "large",
+                "args": [
+                  2501,
+                  "local"
+                ],
+                "expected": 1500
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "cli-and-layout",
+          "kind": "cli",
+          "subject": "SOURCE",
+          "definition": {
+            "cases": [
+              {
+                "id": "external",
+                "argv": [
+                  "python",
+                  "-c",
+                  "import subprocess,sys,json,pathlib\nfor args,wanted,code in [(['501','local','--express'],{'cents':1000},0),(['1001','remote'],{'cents':1700},0),(['0','local'],None,2),(['5','mars'],None,2)]:\n r=subprocess.run([sys.executable,'-m','parcelquote',*args],capture_output=True,text=True);assert r.returncode==code,(args,r.stderr)\n if code==0:assert json.loads(r.stdout)==wanted\nfrom parcelquote import quote\nfor weight,zone in [(True,'local'),(-1,'remote'),(1.5,'local'),(2,'mars')]:\n try:quote(weight,zone)\n except ValueError:pass\n else:raise AssertionError('invalid input accepted')\nassert pathlib.Path('README.md').is_file()\nassert any(pathlib.Path('.').glob('test*.py')) or any(pathlib.Path('tests').glob('test*.py'))\nprint('OK')"
+                ],
+                "stdout": "OK\n"
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 30.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "rates",
+        "cli-and-layout",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "business": [
+          "rates",
+          "cli-and-layout"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {
+        "environment": "Python 3.13, standard library and pytest installed; network disabled. Use python -m pytest -q -p no:cacheprovider."
+      },
+      "reviewer": "capability-suite-curator"
+    },
+    "budget": {
+      "model_calls": 18,
+      "tool_calls": 70,
+      "wall_seconds": 900,
+      "child_calls": 0
+    }
+  },
+  {
+    "id": "multi-file-cart-refactor",
+    "category": "code_development",
+    "goal": "改造购物车项目：保留 checkout.total(items, discount_percent=0) 公共入口，将单行价格计算提取到 pricing.py 的 line_total(item)，每行item含整数cents、quantity；非负整数但不能bool，否则ValueError。先对所有行求和，再用整数向下取整应用0到100的整数百分比折扣；非法折扣抛ValueError。空购物车返回0；计算不能修改输入items。保留现有公开测试且不得编辑 tests/test_existing.py，补充多文件单元测试、实际运行pytest，更新README。",
+    "files": {
+      "checkout.py": "def total(items,discount_percent=0):\n    return sum(x['cents']*x['quantity'] for x in items)\n",
+      "tests/test_existing.py": "from checkout import total\ndef test_basic():assert total([{'cents':100,'quantity':2}])==200\ndef test_empty():assert total([])==0\n",
+      "README.md": "# Cart\nBasic item totals.\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "business",
+          "description": "改造购物车项目：保留 checkout.total(items, discount_percent=0) 公共入口，将单行价格计算提取到 pricing.py 的 line_total(item)，每行item含整数cents、quantity；非负整数但不能bool，否则ValueError。先对所有行求和，再用整数向下取整应用0到100的整数百分比折扣；非法折扣抛ValueError。空购物车返回0；计算不能修改输入items。保留现有公开测试且不得编辑 tests/test_existing.py，补充多文件单元测试、实际运行pytest，更新README。",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "totals",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "checkout",
+            "function": "total",
+            "cases": [
+              {
+                "id": "empty",
+                "args": [
+                  []
+                ],
+                "expected": 0
+              },
+              {
+                "id": "discount",
+                "args": [
+                  [
+                    {
+                      "cents": 199,
+                      "quantity": 3
+                    }
+                  ],
+                  10
+                ],
+                "expected": 537
+              },
+              {
+                "id": "full",
+                "args": [
+                  [
+                    {
+                      "cents": 123,
+                      "quantity": 2
+                    }
+                  ],
+                  100
+                ],
+                "expected": 0
+              },
+              {
+                "id": "aggregate-rounding",
+                "args": [
+                  [
+                    {
+                      "cents": 1,
+                      "quantity": 1
+                    },
+                    {
+                      "cents": 1,
+                      "quantity": 1
+                    }
+                  ],
+                  50
+                ],
+                "expected": 1
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "boundaries-and-refactor",
+          "kind": "cli",
+          "subject": "SOURCE",
+          "definition": {
+            "cases": [
+              {
+                "id": "external",
+                "argv": [
+                  "python",
+                  "-c",
+                  "import copy,pathlib,ast\nfrom checkout import total\nfrom pricing import line_total\nitems=[{'cents':1,'quantity':1},{'cents':1,'quantity':1}];before=copy.deepcopy(items)\nassert total(items,50)==1 and items==before\nfor fn,args in [(total,([],True)),(total,([],-1)),(total,([],101)),(line_total,({'cents':True,'quantity':2},)),(line_total,({'cents':1,'quantity':-1},))]:\n try:fn(*args)\n except ValueError:pass\n else:raise AssertionError('invalid input')\ntree=ast.parse(pathlib.Path('checkout.py').read_text());assert any(isinstance(n,ast.Call) and ((isinstance(n.func,ast.Name) and n.func.id=='line_total') or (isinstance(n.func,ast.Attribute) and n.func.attr=='line_total')) for n in ast.walk(tree))\nassert pathlib.Path('README.md').exists();print('OK')"
+                ],
+                "stdout": "OK\n"
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 30.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "totals",
+        "boundaries-and-refactor",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "business": [
+          "totals",
+          "boundaries-and-refactor"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [
+        "tests/test_existing.py"
+      ],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {
+        "environment": "Python 3.13, standard library and pytest installed; network disabled. Use python -m pytest -q -p no:cacheprovider."
+      },
+      "reviewer": "capability-suite-curator"
+    },
+    "budget": {
+      "model_calls": 18,
+      "tool_calls": 70,
+      "wall_seconds": 900,
+      "child_calls": 0
+    }
+  },
+  {
+    "id": "pytest-ttl-debug",
+    "category": "testing_debugging",
+    "goal": "先实际运行 python -m pytest -q -p no:cacheprovider，记录TTL缓存的失败，再修复cache.py；不要改tests/test_cache.py。TTLCache(ttl,clock)在now>=deadline时过期，缺失/过期返回get的default；set同一key重置过期时间；purge删除所有过期项并返回数量，len只计未过期项；ttl=0立即过期，负ttl抛ValueError。修复后重新运行原始pytest，补充必要回归并写简短BUGFIX.md说明原因。",
+    "files": {
+      "cache.py": "class TTLCache:\n def __init__(self,ttl,clock):\n  if ttl<0:raise ValueError('ttl')\n  self.ttl,self.clock,self.data=ttl,clock,{}\n def set(self,key,value):self.data[key]=(value,self.clock()+self.ttl)\n def get(self,key,default=None):\n  if key not in self.data:return None\n  value,deadline=self.data[key]\n  if self.clock()>deadline:del self.data[key];return default\n  return value\n def purge(self):\n  removed=0\n  for key,(_,deadline) in self.data.items():\n   if self.clock()>deadline:del self.data[key];removed+=1\n  return removed\n def __len__(self):return len(self.data)\n",
+      "tests/test_cache.py": "import pytest\nfrom cache import TTLCache\ndef test_missing_default():assert TTLCache(5,lambda:0).get('absent','fallback')=='fallback'\ndef test_exact_expiry():\n now=[0];c=TTLCache(5,lambda:now[0]);c.set('a',1);now[0]=5;assert c.get('a') is None\ndef test_purge_and_length():\n now=[0];c=TTLCache(1,lambda:now[0]);c.set('a',1);c.set('b',2);now[0]=1;assert c.purge()==2;assert len(c)==0\ndef test_length_purges_expired():\n now=[0];c=TTLCache(1,lambda:now[0]);c.set('a',1);now[0]=2;assert len(c)==0\ndef test_overwrite_resets_deadline():\n now=[0];c=TTLCache(2,lambda:now[0]);c.set('a',1);now[0]=1;c.set('a',2);now[0]=2;assert c.get('a')==2\ndef test_zero_ttl():\n c=TTLCache(0,lambda:0);c.set('a',1);assert c.get('a','expired')=='expired'\ndef test_negative_ttl():\n with pytest.raises(ValueError):TTLCache(-1,lambda:0)\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "business",
+          "description": "先实际运行 python -m pytest -q -p no:cacheprovider，记录TTL缓存的失败，再修复cache.py；不要改tests/test_cache.py。TTLCache(ttl,clock)在now>=deadline时过期，缺失/过期返回get的default；set同一key重置过期时间；purge删除所有过期项并返回数量，len只计未过期项；ttl=0立即过期，负ttl抛ValueError。修复后重新运行原始pytest，补充必要回归并写简短BUGFIX.md说明原因。",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "pytest-and-boundaries",
+          "kind": "cli",
+          "subject": "SOURCE",
+          "definition": {
+            "cases": [
+              {
+                "id": "external",
+                "argv": [
+                  "python",
+                  "-c",
+                  "import subprocess,sys,pathlib\nr=subprocess.run([sys.executable,'-m','pytest','-q','-p','no:cacheprovider'],capture_output=True,text=True)\nassert r.returncode==0,r.stdout+r.stderr\nassert pathlib.Path('BUGFIX.md').is_file()\nfrom cache import TTLCache\nnow=[10];c=TTLCache(2,lambda:now[0]);c.set('x',None);now[0]=12\nassert c.get('x','miss')=='miss' and len(c)==0 and c.purge()==0\nprint('OK')"
+                ],
+                "stdout": "OK\n"
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 30.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "pytest-and-boundaries",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "business": [
+          "pytest-and-boundaries"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [
+        "tests/test_cache.py"
+      ],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {
+        "environment": "Python 3.13, standard library and pytest installed; network disabled. Use python -m pytest -q -p no:cacheprovider."
+      },
+      "reviewer": "capability-suite-curator"
+    },
+    "budget": {
+      "model_calls": 18,
+      "tool_calls": 70,
+      "wall_seconds": 900,
+      "child_calls": 0
+    }
+  },
+  {
+    "id": "source-grounded-documentation",
+    "category": "documentation",
+    "goal": "阅读项目sales_summary.py、示例CSV和现有README，修订README.md并新增docs/usage.md，使用中文说明。只允许修改这两个Markdown文件。准确说明Python 3.11+、仅标准库、无需联网安装依赖、--input/--output参数、输出JSON的rows和total_cents、缺失文件/非法cents退出码2。README链接docs/usage.md；移除旧的pandas、--csv、HTTP服务和端口说明。docs/usage.md提供两个独立的bash代码块，第一个仅一行 python sales_summary.py --help，第二个仅一行 python sales_summary.py --input examples/sales.csv --output /tmp/repo-code-sales.json。实际运行这两条命令以及现有pytest核对文档，解释示例输出rows=3,total_cents=325；不要改源码、测试和示例数据。",
+    "files": {
+      "sales_summary.py": "import argparse,csv,json\nfrom pathlib import Path\ndef main():\n p=argparse.ArgumentParser(description='Summarize sales rows. Python 3.11+, standard library only.')\n p.add_argument('--input',required=True);p.add_argument('--output',required=True);a=p.parse_args()\n try:\n  with open(a.input,encoding='utf-8-sig',newline='') as f:rows=list(csv.DictReader(f))\n  value={'rows':len(rows),'total_cents':sum(int(r['cents']) for r in rows)}\n  Path(a.output).write_text(json.dumps(value,sort_keys=True)+'\\n',encoding='utf-8')\n except (OSError,ValueError,KeyError) as e:p.error(str(e))\n print('processed',len(rows))\nif __name__=='__main__':main()\n",
+      "examples/sales.csv": "name,cents\nA,100\nB,250\nC,-25\n",
+      "tests/test_help.py": "import subprocess,sys\ndef test_help():assert subprocess.run([sys.executable,'sales_summary.py','--help'],capture_output=True).returncode==0\n",
+      "README.md": "# Sales server\nInstall pandas, then python sales_summary.py --csv data.csv. HTTP port 8000.\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "business",
+          "description": "阅读项目sales_summary.py、示例CSV和现有README，修订README.md并新增docs/usage.md，使用中文说明。只允许修改这两个Markdown文件。准确说明Python 3.11+、仅标准库、无需联网安装依赖、--input/--output参数、输出JSON的rows和total_cents、缺失文件/非法cents退出码2。README链接docs/usage.md；移除旧的pandas、--csv、HTTP服务和端口说明。docs/usage.md提供两个独立的bash代码块，第一个仅一行 python sales_summary.py --help，第二个仅一行 python sales_summary.py --input examples/sales.csv --output /tmp/repo-code-sales.json。实际运行这两条命令以及现有pytest核对文档，解释示例输出rows=3,total_cents=325；不要改源码、测试和示例数据。",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "documentation-and-runnable-examples",
+          "kind": "cli",
+          "subject": "SOURCE",
+          "definition": {
+            "cases": [
+              {
+                "id": "external",
+                "argv": [
+                  "python",
+                  "-c",
+                  "import pathlib,re,shlex,subprocess,sys,json\nreadme=pathlib.Path('README.md').read_text(encoding='utf-8');usage=pathlib.Path('docs/usage.md').read_text(encoding='utf-8')\nassert 'docs/usage.md' in readme\nfor token in ['3.11','--input','--output','rows','total_cents','325','2']:assert token in readme+usage,token\nassert any(ord(c)>127 for c in usage)\nfor token in ['pandas','--csv','8000','HTTP']:assert token not in readme+usage,token\nblocks=re.findall(r'```bash\\s*\\n(.*?)```',usage,re.S);assert len(blocks)==2\ncommands=[shlex.split(b.strip()) for b in blocks]\nassert commands==[['python','sales_summary.py','--help'],['python','sales_summary.py','--input','examples/sales.csv','--output','/tmp/repo-code-sales.json']]\nfor command in commands:\n r=subprocess.run(command,capture_output=True,text=True);assert r.returncode==0,r.stderr\nassert json.loads(pathlib.Path('/tmp/repo-code-sales.json').read_text())=={'rows':3,'total_cents':325}\nprint('OK')"
+                ],
+                "stdout": "OK\n"
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 30.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "documentation-and-runnable-examples",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "business": [
+          "documentation-and-runnable-examples"
+        ]
+      },
+      "allowed_paths": [
+        "README.md",
+        "docs/usage.md"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [
+        "sales_summary.py",
+        "tests/**",
+        "examples/**"
+      ],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {
+        "environment": "Python 3.13, standard library and pytest installed; network disabled. Use python -m pytest -q -p no:cacheprovider."
+      },
+      "reviewer": "capability-suite-curator"
+    },
+    "budget": {
+      "model_calls": 18,
+      "tool_calls": 70,
+      "wall_seconds": 900,
+      "child_calls": 0
+    }
+  },
+  {
+    "id": "csv-revisions-refunds",
+    "category": "data_processing",
+    "goal": "实现ledger.py的summarize(csv_text)及CLI python ledger.py INPUT.csv，使用标准库，将订单CSV转成JSON汇总，并处理fixtures/orders.csv，保存实际结果到summary.json。字段order_id,revision,status,currency,amount均去首尾空格；order_id非空，revision为ASCII正整数，status仅paid/cancelled，currency仅CNY/USD，amount为可带负号的十进制整数或1到2位小数；非法行跳过并逐行计invalid_rows。每订单保留最高有效revision，同revision以最后出现行胜出；低revision晚到不覆盖；非法修订不覆盖历史有效记录。最新cancelled不计订单也不计金额；paid负金额视为退款。返回恰好orders、totals_cents、invalid_rows三键：orders为有效paid订单数，totals_cents按币种累计整数分，不能混算币种或产生浮点误差，无paid记录的币种不出现。支持UTF-8 BOM和中文订单号。补充并实际运行pytest，不得修改fixtures/orders.csv。",
+    "files": {
+      "ledger.py": "def summarize(csv_text):\n    raise NotImplementedError\n",
+      "fixtures/orders.csv": "order_id,revision,status,currency,amount\nA,1,paid,CNY,10.10\nB,1,paid,USD,2.30\nA,2,paid,CNY,12.20\nB,2,cancelled,USD,0\nC,1,paid,CNY,-2.05\nA,1,paid,CNY,99\nD,1,paid,USD,bad\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "business",
+          "description": "实现ledger.py的summarize(csv_text)及CLI python ledger.py INPUT.csv，使用标准库，将订单CSV转成JSON汇总，并处理fixtures/orders.csv，保存实际结果到summary.json。字段order_id,revision,status,currency,amount均去首尾空格；order_id非空，revision为ASCII正整数，status仅paid/cancelled，currency仅CNY/USD，amount为可带负号的十进制整数或1到2位小数；非法行跳过并逐行计invalid_rows。每订单保留最高有效revision，同revision以最后出现行胜出；低revision晚到不覆盖；非法修订不覆盖历史有效记录。最新cancelled不计订单也不计金额；paid负金额视为退款。返回恰好orders、totals_cents、invalid_rows三键：orders为有效paid订单数，totals_cents按币种累计整数分，不能混算币种或产生浮点误差，无paid记录的币种不出现。支持UTF-8 BOM和中文订单号。补充并实际运行pytest，不得修改fixtures/orders.csv。",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "ledger-cases",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "ledger",
+            "function": "summarize",
+            "cases": [
+              {
+                "id": "sample",
+                "args": [
+                  "order_id,revision,status,currency,amount\nA,1,paid,CNY,10.10\nB,1,paid,USD,2.30\nA,2,paid,CNY,12.20\nB,2,cancelled,USD,0\nC,1,paid,CNY,-2.05\nA,1,paid,CNY,99\nD,1,paid,USD,bad\n"
+                ],
+                "expected": {
+                  "orders": 2,
+                  "totals_cents": {
+                    "CNY": 1015
+                  },
+                  "invalid_rows": 1
+                }
+              },
+              {
+                "id": "empty",
+                "args": [
+                  "order_id,revision,status,currency,amount\n"
+                ],
+                "expected": {
+                  "orders": 0,
+                  "totals_cents": {},
+                  "invalid_rows": 0
+                }
+              },
+              {
+                "id": "tie-stale",
+                "args": [
+                  "order_id,revision,status,currency,amount\n甲,2,paid,USD,0.10\n甲,1,paid,CNY,99\n甲,2,paid,USD,0.20\n"
+                ],
+                "expected": {
+                  "orders": 1,
+                  "totals_cents": {
+                    "USD": 20
+                  },
+                  "invalid_rows": 0
+                }
+              },
+              {
+                "id": "invalid-revision",
+                "args": [
+                  "order_id,revision,status,currency,amount\nA,1,paid,CNY,3.33\nA,2,paid,CNY,1.234\nB,0,paid,USD,2\nC,1,pending,CNY,5\nD,1,paid,EUR,3\n"
+                ],
+                "expected": {
+                  "orders": 1,
+                  "totals_cents": {
+                    "CNY": 333
+                  },
+                  "invalid_rows": 4
+                }
+              },
+              {
+                "id": "bom-spaces",
+                "args": [
+                  "﻿order_id,revision,status,currency,amount\n 甲 , 1 , paid , CNY , 0.10 \n乙,1,paid,CNY,0.20\n丙,1,paid,USD,-0.01\n"
+                ],
+                "expected": {
+                  "orders": 3,
+                  "totals_cents": {
+                    "CNY": 30,
+                    "USD": -1
+                  },
+                  "invalid_rows": 0
+                }
+              },
+              {
+                "id": "cancel",
+                "args": [
+                  "order_id,revision,status,currency,amount\nA,1,paid,CNY,8\nA,3,cancelled,CNY,0\nA,2,paid,CNY,7\n"
+                ],
+                "expected": {
+                  "orders": 0,
+                  "totals_cents": {},
+                  "invalid_rows": 0
+                }
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "cli-and-saved-output",
+          "kind": "cli",
+          "subject": "SOURCE",
+          "definition": {
+            "cases": [
+              {
+                "id": "external",
+                "argv": [
+                  "python",
+                  "-c",
+                  "import json,pathlib,subprocess,sys\nr=subprocess.run([sys.executable,'ledger.py','fixtures/orders.csv'],capture_output=True,text=True);assert r.returncode==0,r.stderr\nwanted={'orders':2,'totals_cents':{'CNY':1015},'invalid_rows':1}\nassert json.loads(r.stdout)==wanted\nassert json.loads(pathlib.Path('summary.json').read_text())==wanted\nprint('OK')"
+                ],
+                "stdout": "OK\n"
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 30.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "ledger-cases",
+        "cli-and-saved-output",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "business": [
+          "ledger-cases",
+          "cli-and-saved-output"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [
+        "fixtures/**"
+      ],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {
+        "environment": "Python 3.13, standard library and pytest installed; network disabled. Use python -m pytest -q -p no:cacheprovider."
+      },
+      "reviewer": "capability-suite-curator"
+    },
+    "budget": {
+      "model_calls": 18,
+      "tool_calls": 70,
+      "wall_seconds": 900,
+      "child_calls": 0
+    }
+  }
+]

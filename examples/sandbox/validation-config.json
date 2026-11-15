@@ -1,0 +1,9 @@
+{
+  "image": "repo-code-sandbox@sha256:994f52230f4076c130f60882056d3f82adb3359dda1d1bfbe41a9ffa41811607",
+  "base_image": "python@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb",
+  "provider": "openai",
+  "model": "YOUR_AVAILABLE_MODEL_ID",
+  "reasoning_effort": "medium",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY"
+}

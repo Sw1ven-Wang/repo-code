@@ -1,0 +1,651 @@
+[
+  {
+    "id": "bugfix-average",
+    "goal": "Fix stats.average(values): return the arithmetic mean for a nonempty numeric list and None for an empty list. Use the Python standard library only; run your checks and request final external verification.",
+    "files": {
+      "stats.py": "def average(values):\n    return sum(values) // len(values)\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "behavior",
+          "description": "Fix stats.average(values): return the arithmetic mean for a nonempty numeric list and None for an empty list.",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "behavior",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "stats",
+            "function": "average",
+            "cases": [
+              {
+                "id": "fraction",
+                "args": [
+                  [
+                    1,
+                    2
+                  ]
+                ],
+                "expected": 1.5
+              },
+              {
+                "id": "negative",
+                "args": [
+                  [
+                    -2,
+                    0,
+                    5
+                  ]
+                ],
+                "expected": 1.0
+              },
+              {
+                "id": "empty",
+                "args": [
+                  []
+                ],
+                "expected": null
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "behavior",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "behavior": [
+          "behavior"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {},
+      "reviewer": "live-benchmark-curator-v1"
+    },
+    "budget": {
+      "model_calls": 16,
+      "tool_calls": 48,
+      "wall_seconds": 240
+    }
+  },
+  {
+    "id": "greenfield-csv",
+    "goal": "Create report.py with summarize(csv_text). Parse CSV with headers name,amount; return {rows: count, total: numeric sum}, ignore blank lines, and support a header-only input. Use the Python standard library only; run your checks and request final external verification.",
+    "files": {},
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "behavior",
+          "description": "Create report.py with summarize(csv_text). Parse CSV with headers name,amount; return {rows: count, total: numeric sum}, ignore blank lines, and support a header-only input.",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "behavior",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "report",
+            "function": "summarize",
+            "cases": [
+              {
+                "id": "rows",
+                "args": [
+                  "name,amount\nA,1.5\nB,2.5\n"
+                ],
+                "expected": {
+                  "rows": 2,
+                  "total": 4.0
+                }
+              },
+              {
+                "id": "empty",
+                "args": [
+                  "name,amount\n"
+                ],
+                "expected": {
+                  "rows": 0,
+                  "total": 0.0
+                }
+              },
+              {
+                "id": "blank",
+                "args": [
+                  "name,amount\nA,-2\n\nB,3\n"
+                ],
+                "expected": {
+                  "rows": 2,
+                  "total": 1.0
+                }
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "behavior",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "behavior": [
+          "behavior"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {},
+      "reviewer": "live-benchmark-curator-v1"
+    },
+    "budget": {
+      "model_calls": 16,
+      "tool_calls": 48,
+      "wall_seconds": 240
+    }
+  },
+  {
+    "id": "multi-file-cart",
+    "goal": "Fix checkout.total(items,discount_percent). Each item has integer cents and quantity. Sum all items, then apply one global percentage discount, floor to integer cents. Empty carts return 0. Keep pricing.py as the line-total helper and do not apply the discount twice. Use the Python standard library only; run your checks and request final external verification.",
+    "files": {
+      "pricing.py": "def line_total(item):\n    return item[\"cents\"]\n",
+      "checkout.py": "from pricing import line_total\ndef total(items,discount_percent=0):\n    subtotal=sum(line_total(x) for x in items)\n    return subtotal - discount_percent\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "behavior",
+          "description": "Fix checkout.total(items,discount_percent). Each item has integer cents and quantity. Sum all items, then apply one global percentage discount, floor to integer cents. Empty carts return 0. Keep pricing.py as the line-total helper and do not apply the discount twice.",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "behavior",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "checkout",
+            "function": "total",
+            "cases": [
+              {
+                "id": "quantity",
+                "args": [
+                  [
+                    {
+                      "cents": 125,
+                      "quantity": 3
+                    }
+                  ],
+                  20
+                ],
+                "expected": 300
+              },
+              {
+                "id": "two",
+                "args": [
+                  [
+                    {
+                      "cents": 99,
+                      "quantity": 2
+                    },
+                    {
+                      "cents": 50,
+                      "quantity": 1
+                    }
+                  ],
+                  10
+                ],
+                "expected": 223
+              },
+              {
+                "id": "empty",
+                "args": [
+                  [],
+                  10
+                ],
+                "expected": 0
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "behavior",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "behavior": [
+          "behavior"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {},
+      "reviewer": "live-benchmark-curator-v1"
+    },
+    "budget": {
+      "model_calls": 16,
+      "tool_calls": 48,
+      "wall_seconds": 240
+    }
+  },
+  {
+    "id": "async-batching",
+    "goal": "Create batches.py with async collect(items, size). Return the items partitioned into lists of at most size, preserving order including the last partial batch. Inputs use positive sizes; empty input returns []. Use the Python standard library only; run your checks and request final external verification.",
+    "files": {},
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "behavior",
+          "description": "Create batches.py with async collect(items, size). Return the items partitioned into lists of at most size, preserving order including the last partial batch. Inputs use positive sizes; empty input returns [].",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "behavior",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "batches",
+            "function": "collect",
+            "cases": [
+              {
+                "id": "tail",
+                "args": [
+                  [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5
+                  ],
+                  2
+                ],
+                "expected": [
+                  [
+                    1,
+                    2
+                  ],
+                  [
+                    3,
+                    4
+                  ],
+                  [
+                    5
+                  ]
+                ]
+              },
+              {
+                "id": "empty",
+                "args": [
+                  [],
+                  2
+                ],
+                "expected": []
+              },
+              {
+                "id": "large",
+                "args": [
+                  [
+                    1,
+                    2
+                  ],
+                  5
+                ],
+                "expected": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "behavior",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "behavior": [
+          "behavior"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {},
+      "reviewer": "live-benchmark-curator-v1"
+    },
+    "budget": {
+      "model_calls": 16,
+      "tool_calls": 48,
+      "wall_seconds": 240
+    }
+  },
+  {
+    "id": "nested-config",
+    "goal": "Fix config.merge(base,override). Recursively merge dictionary values, preserve unspecified base keys, and replace scalar/list values with the override value. Return the merged dictionary. Use the Python standard library only; run your checks and request final external verification.",
+    "files": {
+      "config.py": "def merge(base,override):\n    return {**base,**override}\n"
+    },
+    "contract": {
+      "revision": 1,
+      "status": "FROZEN",
+      "requirements": [
+        {
+          "id": "behavior",
+          "description": "Fix config.merge(base,override). Recursively merge dictionary values, preserve unspecified base keys, and replace scalar/list values with the override value. Return the merged dictionary.",
+          "critical": true,
+          "subjects": [
+            "SOURCE"
+          ],
+          "authorities": [
+            "TRUSTED_EXTERNAL",
+            "TRUSTED_HUMAN"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "id": "behavior",
+          "kind": "function",
+          "subject": "SOURCE",
+          "definition": {
+            "module": "config",
+            "function": "merge",
+            "cases": [
+              {
+                "id": "nested",
+                "args": [
+                  {
+                    "db": {
+                      "host": "local",
+                      "port": 1
+                    },
+                    "debug": false
+                  },
+                  {
+                    "db": {
+                      "port": 2
+                    }
+                  }
+                ],
+                "expected": {
+                  "db": {
+                    "host": "local",
+                    "port": 2
+                  },
+                  "debug": false
+                }
+              },
+              {
+                "id": "list",
+                "args": [
+                  {
+                    "x": [
+                      1,
+                      2
+                    ]
+                  },
+                  {
+                    "x": [
+                      3
+                    ]
+                  }
+                ],
+                "expected": {
+                  "x": [
+                    3
+                  ]
+                }
+              },
+              {
+                "id": "new",
+                "args": [
+                  {},
+                  {
+                    "new": {
+                      "enabled": true
+                    }
+                  }
+                ],
+                "expected": {
+                  "new": {
+                    "enabled": true
+                  }
+                }
+              }
+            ]
+          },
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        },
+        {
+          "id": "syntax",
+          "kind": "static_python",
+          "subject": "SOURCE",
+          "definition": {},
+          "protected": true,
+          "active": true,
+          "permitted_authorities": [
+            "TRUSTED_EXTERNAL"
+          ],
+          "allowed_skips": [],
+          "timeout": 20.0
+        }
+      ],
+      "required_checks": [
+        "behavior",
+        "syntax"
+      ],
+      "global_required_checks": [
+        "syntax"
+      ],
+      "coverage": {
+        "behavior": [
+          "behavior"
+        ]
+      },
+      "allowed_paths": [
+        "**"
+      ],
+      "forbidden_paths": [
+        ".git",
+        ".git/**",
+        ".repo-code",
+        ".repo-code/**"
+      ],
+      "protected_paths": [],
+      "max_changed_files": 100,
+      "deliverable": "source",
+      "interface": {},
+      "reviewer": "live-benchmark-curator-v1"
+    },
+    "budget": {
+      "model_calls": 16,
+      "tool_calls": 48,
+      "wall_seconds": 240
+    }
+  }
+]

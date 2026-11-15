@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo-code"
+version = "1.5.1"
+description = "Local coding agent with evidence-bound delivery and governed targeted evolution"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.7,<3"]
+[project.urls]
+Repository = "https://github.com/Sw1ven-Wang/repo-code"
+Issues = "https://github.com/Sw1ven-Wang/repo-code/issues"
+
+[project.optional-dependencies]
+models = ["openai>=1.50,<4", "anthropic>=0.40,<1"]
+chatgpt = ["openai>=3.42,<4", "httpx>=0.28,<1", "PyJWT[crypto]>=2.8,<3"]
+harbor = ["harbor==0.25.0", "litellm==1.109.0.dev2", "openai==3.42.0"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.23,<2", "pytest-cov>=5,<8", "fastapi>=0.115,<1", "httpx>=0.28,<1"]
+[project.scripts]
+repo-code = "repo_code.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = ["isolation: requires Linux root chroot or Docker", "docker_backend: requires an explicit Docker daemon and pinned image", "live: explicitly paid external model integration"]

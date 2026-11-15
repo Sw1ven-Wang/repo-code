@@ -1,0 +1,81 @@
+{
+  "revision": 1,
+  "status": "FROZEN",
+  "requirements": [
+    {
+      "id": "answer",
+      "description": "main.answer() returns the integer 42",
+      "critical": true,
+      "subjects": [
+        "SOURCE"
+      ],
+      "authorities": [
+        "TRUSTED_EXTERNAL",
+        "TRUSTED_HUMAN"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "answer",
+      "kind": "function",
+      "subject": "SOURCE",
+      "definition": {
+        "module": "main",
+        "function": "answer",
+        "cases": [
+          {
+            "id": "answer-is-42",
+            "expected": 42
+          }
+        ]
+      },
+      "protected": true,
+      "active": true,
+      "allowed_skips": [],
+      "timeout": 20.0
+    },
+    {
+      "id": "syntax",
+      "kind": "static_python",
+      "subject": "SOURCE",
+      "definition": {},
+      "protected": true,
+      "active": true,
+      "allowed_skips": [],
+      "timeout": 20.0
+    }
+  ],
+  "required_checks": [
+    "answer",
+    "syntax"
+  ],
+  "global_required_checks": [
+    "syntax"
+  ],
+  "coverage": {
+    "answer": [
+      "answer"
+    ]
+  },
+  "allowed_paths": [
+    "**"
+  ],
+  "forbidden_paths": [
+    ".git",
+    ".git/**",
+    ".repo-code",
+    ".repo-code/**"
+  ],
+  "protected_paths": [],
+  "max_changed_files": 100,
+  "deliverable": "source",
+  "interface": {
+    "language": "Python",
+    "module": "main",
+    "function": "answer",
+    "arguments": [],
+    "return": "integer 42"
+  },
+  "reviewer": "reviewed-offline-demo-fixture"
+}

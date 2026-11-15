@@ -1,0 +1,13 @@
+{
+  "image": "repo-code-native-validation@sha256:eb25bbe4ad55ebfb3840a62d3f182ba864386f912ffd0826360c14cf7d5eaf88",
+  "base_tag": "repo-code-sandbox:1.5.1-validation",
+  "capabilities": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "SYS_CHROOT",
+    "KILL"
+  ]
+}

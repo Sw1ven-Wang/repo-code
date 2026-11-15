@@ -1,0 +1,98 @@
+{
+  "revision": 1,
+  "status": "FROZEN",
+  "requirements": [
+    {
+      "id": "api",
+      "description": "GET /value/{n} returns integer 2*n; unknown routes return HTTP404",
+      "critical": true,
+      "subjects": [
+        "SOURCE"
+      ],
+      "authorities": [
+        "TRUSTED_EXTERNAL",
+        "TRUSTED_HUMAN"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "http",
+      "kind": "asgi",
+      "subject": "SOURCE",
+      "definition": {
+        "module": "main",
+        "app": "app",
+        "cases": [
+          {
+            "id": "normal",
+            "path": "/value/21",
+            "expected_status": 200,
+            "expected_body": {
+              "value": 42
+            }
+          },
+          {
+            "id": "negative",
+            "path": "/value/-3",
+            "expected_status": 200,
+            "expected_body": {
+              "value": -6
+            }
+          },
+          {
+            "id": "missing",
+            "path": "/missing",
+            "expected_status": 404,
+            "expected_body": {
+              "detail": "Not Found"
+            }
+          }
+        ]
+      },
+      "protected": true,
+      "active": true,
+      "allowed_skips": [],
+      "timeout": 20.0
+    },
+    {
+      "id": "syntax",
+      "kind": "static_python",
+      "subject": "SOURCE",
+      "definition": {},
+      "protected": true,
+      "active": true,
+      "allowed_skips": [],
+      "timeout": 20.0
+    }
+  ],
+  "required_checks": [
+    "http",
+    "syntax"
+  ],
+  "global_required_checks": [
+    "syntax"
+  ],
+  "coverage": {
+    "api": [
+      "http"
+    ]
+  },
+  "allowed_paths": [
+    "**"
+  ],
+  "forbidden_paths": [
+    ".git",
+    ".git/**",
+    ".repo-code",
+    ".repo-code/**"
+  ],
+  "protected_paths": [],
+  "max_changed_files": 100,
+  "deliverable": "source",
+  "interface": {
+    "transport": "ASGI",
+    "app": "main.app"
+  },
+  "reviewer": "reviewed-demo-api-curator"
+}

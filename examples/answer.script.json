@@ -1,0 +1,59 @@
+[
+  {
+    "tool_calls": [
+      {
+        "id": "create-main",
+        "name": "create",
+        "arguments": {
+          "path": "main.py",
+          "content": "def answer():\n    return 0\n"
+        }
+      }
+    ]
+  },
+  {
+    "text": "Request the first verification; this does not assert success."
+  },
+  {
+    "tool_calls": [
+      {
+        "id": "read-main",
+        "name": "read",
+        "arguments": {
+          "path": "main.py"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "id": "correct-main",
+        "name": "edit",
+        "arguments": {
+          "path": "main.py",
+          "old_text": "return 0",
+          "new_text": "return 42"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "id": "run-main",
+        "name": "process.run",
+        "arguments": {
+          "argv": [
+            "python",
+            "-c",
+            "from main import answer; print(answer())"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "text": "The implementation is corrected. Request the external verification and delivery commit."
+  }
+]

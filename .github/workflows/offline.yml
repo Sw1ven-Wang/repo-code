@@ -1,0 +1,36 @@
+name: Linux offline integration
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare a matching system Python environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv libseccomp2
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip setuptools wheel
+          .venv/bin/python -m pip install -r examples/sandbox/requirements.validation.txt -r examples/sandbox/requirements.native-validation.txt -e '.[dev,chatgpt]'
+      - name: Offline tests in disposable runner
+        run: sudo .venv/bin/python scripts/validate.py --suite native --timeout-seconds 1800
+      - name: Check published source hashes and documentation
+        run: .venv/bin/python scripts/check_distribution.py
+      - name: Build wheel
+        run: PATH="$PWD/.venv/bin:$PATH" sh scripts/build.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repo-code-offline
+          path: |
+            reports/validation*.xml
+            reports/validation*.json
+            reports/validation*.log
+            reports/design-reference*
+            dist/*.whl

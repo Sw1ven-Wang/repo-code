@@ -1,0 +1,16 @@
+# Disposable Linux host for exercising the actual native backend.
+# The host driver verifies this local tag against validation-config.json's
+# immutable RepoDigest before building; a local tag avoids registry lookups.
+ARG BASE_IMAGE=repo-code-sandbox:1.5.1-validation
+FROM ${BASE_IMAGE}
+COPY requirements.native-validation.txt /opt/repo-code/requirements.native-validation.txt
+USER 0:0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv libseccomp2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/python3 -m venv /opt/native-venv \
+    && /opt/native-venv/bin/python -m pip install --no-cache-dir -r /opt/repo-code/requirements.txt -r /opt/repo-code/requirements.native-validation.txt \
+    && /opt/native-venv/bin/python -m pip freeze > /opt/repo-code/native-installed.txt
+ENV PATH=/opt/native-venv/bin:/usr/local/bin:/usr/bin:/bin \
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /work

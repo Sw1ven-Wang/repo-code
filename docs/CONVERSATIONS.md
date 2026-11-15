@@ -1,0 +1,17 @@
+# Persistent conversations
+
+`new_task(..., conversation=True)` creates an opt-in persistent Run without a frozen acceptance contract. After each complete assistant answer, `execute(run_id)` returns `WAITING_USER`. The Run ID, workspace, history and cumulative budgets remain unchanged.
+
+Use `submit_turn(run_id, unique_turn_id, text)` followed by `await execute(run_id)` for each subsequent user message. Repeating an accepted turn ID with the same text is idempotent; different text is rejected. Pending controls, uncertain operations or live resources prevent admission. Both service operations use the executor lock. Cancellation and terminal states cannot admit new turns.
+
+Call `finish_conversation(run_id)` from `WAITING_USER` after the final turn. It ends as `PARTIAL`; completion of a conversation does not certify external acceptance. Default single-turn behavior and terminal-state immutability remain unchanged. Active execution time accumulates across turns; waiting for user input pauses the active clock. Controllers needing an elapsed wall-clock deadline must also enforce that deadline.
+
+Memory v2 uses the same interface and runs terminal maintenance only after a terminal outcome. Learning configuration remains a separate frozen policy.
+
+The original `goal` and TaskSpec remain the overall task. Each admitted conversation turn also stores an `active_turn` (turn ID and exact user request). Planning, skill selection and knowledge selection use that current request. An idempotent replay of an older turn cannot roll it backwards. Plans are tagged with the active turn ID; an older plan remains in the audit store but does not become the next turn's subgoal. A current plan is still a model proposal, and never changes acceptance.
+
+Legacy context folding preserves the active user message and the latest complete assistant/tool group. It reclaims optional tool snippets before rejecting a full context. If necessary, owned archived tool bodies become bounded previews with artifact references; raw history, error outcomes and observed edit versions remain available. An oversized mandatory user request or unarchived protocol group still fails closed at the configured limit. Memory v2 keeps its working-state/semantic-summary structure, including the full current request and a retrieval intent based on it. Neither arm gains cross-task learning from conversation admission.
+
+Trusted provider wrappers must raise `ProviderNotDispatched(code, message)` only when they can prove that inference was never dispatched, such as a local cumulative-budget admission rejection. Main, compaction and consolidation reservations then become `NOT_DISPATCHED` with zero charge. A timeout, an ordinary `RepoError`, an error code mentioning a budget, or missing Usage alone does not establish non-dispatch; unknown requests keep their conservative reservation. Host compaction-budget rejection propagates as a budget stop rather than being treated as invalid summary extraction. Native model-call counters still count admitted attempts, separately from actual inference Usage.
+
+The subscription provider accepts optional `max_output_tokens` at construction. When set, the exact field is serialized into every Responses request and recorded as `max_tokens` in model configuration. Omission preserves the previous request format. Route support must be checked before an experiment. Legacy context policies may set `safety_tokens` independently of `reserve_tokens`.

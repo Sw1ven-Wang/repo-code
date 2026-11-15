@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "name": "calculator",
+      "root": "/REPLACE/WITH/ABSOLUTE/PATH/TO/examples/mcp",
+      "command": ["python", "server.py"]
+    }
+  ]
+}
