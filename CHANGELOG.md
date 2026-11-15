@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add opt-in deterministic live context projection for Memory v1/v2, with immutable source references, checkpoint/control fences, crash recovery and benchmark profile inheritance. Keep the default `legacy`; this is experimental and does not establish model quality, cache or cost gains. See [Live Compact](docs/LIVE_COMPACT.md).
+
 - Add a shared bounded work/validation ledger and safe public-baseline `workspace.diff`; make delivery guidance effective while keeping external handoffs PARTIAL. Replace recursive v1 history dumps with stable group indexes and supplement exact repetition guards with versioned cross-tool coverage and bounded same-state recovery.
 - Preserve current-candidate checks and a bounded FACT/EPISODE floor in Memory v2 projections. Add early SWE candidate-policy feedback, deterministic malformed-YAML rejection, capability-filtered tools, recorded all-purpose budget feedback, structural command metrics, and versioned continuous-task stage/terminal calibration controls. Historical experiments and scores remain immutable.
 

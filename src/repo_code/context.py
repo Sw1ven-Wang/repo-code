@@ -87,6 +87,7 @@ class ContextEngine:
             artifacts.add(ref);projected.append({**message,'content':content})
         return projected
     def build(self,run_id,tools,policy=None,memory_policy=None,system_suffix=""):
+        self.live_token=None
         run=self.runtime.run(run_id);m=run["data"]["manifest"]
         if m.get("memory_schema_version")==2:raise RepoError("ASYNC_MEMORY_CONTEXT_REQUIRED","Use await MemoryService.prepare_context; no nested asyncio.run")
         knowledge=Knowledge(self.store)
@@ -105,6 +106,24 @@ class ContextEngine:
         turn=run['data'].get('active_turn') if m.get('conversation_mode') else None
         active_group=next((g for g in reversed(all_groups) if turn and len(g)==1 and g[0].get('role')=='user' and g[0].get('content')==turn['text']),None)
         if turn and active_group is None:raise RepoError('ACTIVE_TURN_MESSAGE_MISSING')
+        active_index = next((i for i, g in enumerate(all_groups) if g is active_group), None)
+        live_trace=None;protected_live=set()
+        if m.get('context_compaction'):
+            from .live_compact_state import LiveProjection
+            live=LiveProjection(self.store,self.runtime)
+            scale=max(self.input_scale,input_token_scale(self.provider)) if self.provider is not None else self.input_scale
+            serializer=self.request_serializer or (lambda s,msg,t:[s,msg,t])
+            # Native empty-request cost includes serializer overhead and schemas.
+            history_budget=max_tokens-reserve-math.ceil(estimate_tokens(serializer(system,[],tools))*scale)
+            projected,live_trace=live.project(run_id,all_groups,system=system,tools=tools,
+                serialize=serializer,available_history=history_budget,scale=scale,
+                fits_limit=lambda msg: math.ceil(estimate_tokens(serializer(system,msg,tools))*scale)+reserve<=max_tokens)
+            floor=live_trace.get('head')
+            protected_live={id(g) for i,g in enumerate(projected) if floor and i<=floor['group_end']}
+            # Active user slot is never replaced; preserve its object identity.
+            all_groups=projected
+            if active_index is not None: active_group=all_groups[active_index]
+            self.live_token=live_trace
         folded=[];retained=list(all_groups);optional_observations=True;bounded_pass=0;external_artifacts=set();archive_cache={}
         # Measure the actual serialized request, including the variable-size
         # summary and approved guidance. A fixed 1,000-token summary allowance
@@ -124,13 +143,22 @@ class ContextEngine:
             if estimated+reserve<=max_tokens:break
             if folded and optional_observations:
                 optional_observations=False;continue
-            foldable=next((i for i,g in enumerate(retained[:-1]) if g is not active_group),None)
+            # A committed checkpoint is a floor: fallback cannot rewrite it or
+            # move any older prefix into a newly generated archive summary.
+            live_floor=(live_trace or {}).get('head')
+            foldable=next((i for i,g in enumerate(retained[:-1]) if g is not active_group
+                and not live_floor
+                and id(g) not in protected_live),None)
             if foldable is not None:
                 folded.append(retained.pop(foldable));continue
             if bounded_pass<2:
                 allowance=(1200,512)[bounded_pass];bounded_pass+=1
-                retained=[g if g is active_group else self._bounded_group(run_id,g,allowance,external_artifacts) for g in retained]
+                retained=[g if g is active_group or id(g) in protected_live else self._bounded_group(run_id,g,allowance,external_artifacts) for g in retained]
                 continue
             raise RepoError("CONTEXT_BUDGET_EXCEEDED","last complete group, active request and required summary exceed budget; read bounded tool outputs")
         self.store.put("projection",run_id,{"snapshot":m["knowledge_snapshot_digest"],"index":m["knowledge_index_digest"],"knowledge_ids":[x["id"] for x in hits],"folded_groups":len(folded),"summary_ref":summary_ref,"estimated_tokens":estimated,"optional_tool_snippets":bool(folded and optional_observations),"bounded_tool_artifacts":sorted(external_artifacts),"estimate_only":True})
+        if live_trace:
+            projection=self.store.get('projection',run_id);projection['live_compact']=live_trace
+            self.store.put('projection',run_id,projection)
+            live.assert_current(run_id,live_trace)
         return system,messages

@@ -16,6 +16,7 @@ L2  元优化器 → 有界 L1 搜索 → 独立质量与发布门禁
 
 - 工具包括文件检索、版本绑定编辑、批量 patch、进程和受控 MCP；副作用由 Host 管理。
 - 上下文预算、历史归档与可选 Memory v2 profile；**默认保持 Memory v1**。
+- 可选 `--context-compaction live-experimental`：用确定性历史卡片压缩模型视图，保留原始证据；**默认仍为 legacy**。见 [行为与回滚](docs/LIVE_COMPACT.md) 和 [验证边界](docs/LIVE_COMPACT_REVIEW.md)。
 - L1 经验有来源、适用条件、证据引用、撤销与应用回执；草案保存不等于激活。
 - `skill.bind` 将抽象能力绑定到当前任务已经读取的文件与验证命令。
 - 会话级经验复用与永久 Release 分开；保留独立验证和 G3/G4/G4b 门禁。

@@ -61,7 +61,8 @@ async def execute(args, status, tasks):
     if getattr(args,'reasoning_effort',None):options['reasoning_effort']=args.reasoning_effort
     provider=cls(args.model,**options)
     try:
-        app=RepoCode(args.state,provider,sandbox=args.sandbox,image=args.image)
+        app=RepoCode(args.state,provider,sandbox=args.sandbox,image=args.image,
+                     context_compaction=args.context_compaction)
         if not app.sandbox.isolated:raise RepoError('ISOLATION_REQUIRED')
         app.sandbox.prepare()  # Fail closed; Docker availability is not presumed.
         runner=TrialRunner(app,lambda public:provider)
@@ -96,6 +97,7 @@ def main(argv=None):
     p.add_argument('--model',required=True)
     p.add_argument('--api-key-env');p.add_argument('--base-url')
     p.add_argument('--reasoning-effort',choices=['none','minimal','low','medium','high','xhigh'])
+    p.add_argument('--context-compaction',choices=['legacy','live-experimental'],default='legacy')
     p.add_argument('--sandbox',choices=['native','docker'],required=True);p.add_argument('--image')
     p.add_argument('--state',type=Path,required=True);p.add_argument('--report',type=Path,required=True)
     p.add_argument('--dataset',type=Path,default=Path(__file__).resolve().parents[1]/'examples'/'live_benchmark_tasks.json')

@@ -76,7 +76,7 @@ async def probe_native():
         'credentials_absent':True,'can_signal_dropped_uid':True,'probe':result,'environment':sandbox.environment()}
 
 
-def inside(selection,timeout_seconds=600):
+def inside(selection,timeout_seconds=1800):
     destination=Path('/work/results');destination.mkdir(parents=True,exist_ok=True)
     sandbox,preflight=asyncio.run(probe_native());write(destination/'preflight.json',preflight)
     env=os.environ.copy();env.update(PYTHONPATH=str(ROOT/'src'),REPO_CODE_TEST_KIT=str(sandbox.kit),PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
@@ -137,7 +137,13 @@ def host(args):
         write(profile_path,profile)
     if not re.fullmatch(r'[^\s]+@sha256:[a-f0-9]{64}',profile['image']):raise ValueError('Repository digest required')
     checked(['docker','image','inspect',profile['image']],timeout=20)
-    source=archive_source(output);write(output/'profile.json',profile)
+    if args.source_archive:
+        source=output/'source-input.tar'
+        shutil.copyfile(args.source_archive.resolve(),source)
+        write(output/'source-input-manifest.json',{'archive_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
+            'source_archive':str(args.source_archive.resolve()),'note':'Explicit frozen source archive supplied by operator'})
+    else:source=archive_source(output)
+    write(output/'profile.json',profile)
     command=['docker','run','--detach','--init','--user','0:0','--network','none','--cap-drop','ALL',
              '--security-opt','no-new-privileges','--memory','4g','--cpus','2','--pids-limit','512',
              '--mount',f'type=bind,source={source},target=/input/source.tar,readonly']
@@ -167,7 +173,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path)
     parser.add_argument('--selection',type=Path,help='Optional exact native test node IDs in a JSON list')
-    parser.add_argument('--timeout-seconds',type=int,default=600,help='Offline suite deadline; independent of model/Agent budgets')
+    parser.add_argument('--source-archive',type=Path,help='Optional frozen source tar instead of the current working tree')
+    parser.add_argument('--timeout-seconds',type=int,default=1800,help='Offline suite deadline; independent of Agent budgets')
     parser.add_argument('--build',action='store_true',help='Build system Python/libseccomp test-host image; records its actual digest')
     parser.add_argument('--inside',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()

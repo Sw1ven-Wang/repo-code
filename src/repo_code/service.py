@@ -10,11 +10,14 @@ from .providers import model_configuration
 
 class RepoCode:
     """Public composition root shared by CLI, tests and embedding applications."""
-    def __init__(self,state_root,provider,sandbox="auto",image=None,on_delta=None,memory_profile=None,memory_encoder=None):
+    def __init__(self,state_root,provider,sandbox="auto",image=None,on_delta=None,memory_profile=None,memory_encoder=None,*,context_compaction='legacy',live_compact_profile=None):
         if hasattr(provider,'assert_state_safe'):provider.assert_state_safe(state_root)
         self.provider=provider
         self.store=Store(Path(state_root));self.sandbox=Sandbox(self.store,sandbox,image)
         self.runtime=Runtime(self.store,self.sandbox);self.releases=Releases(self.store,self.sandbox);self.releases.bootstrap()
+        from .live_compact_state import configuration
+        self.context_compaction=configuration(context_compaction,live_compact_profile)
+        self.runtime.context_compaction=self.context_compaction
         self.broker=Broker(self.store,self.runtime,self.sandbox,provider);self.grader=Grader(self.store,self.sandbox)
         self.agent=CodingAgent(self.store,self.runtime,self.broker,self.grader,self.releases,provider,on_delta)
         self.memory=None
@@ -41,6 +44,8 @@ class RepoCode:
         from .util import execution_lock,RepoError
         with execution_lock(self.store.root/"executor_locks"/(run_id+".lock")):
             manifest=self.runtime.run(run_id)["data"]
+            if manifest['manifest'].get('context_compaction')!=self.context_compaction:
+                raise RepoError('RUN_CONTEXT_COMPACTION_CHANGED','Resume with the original context compaction mode and profile')
             if manifest["manifest"].get("memory_schema_version")==2 and (self.memory is None or self.memory.profile_digest!=manifest["manifest"]["memory_profile_digest"]):
                 raise RepoError("RUN_MEMORY_CONFIGURATION_CHANGED")
             supplied=model_configuration(self.agent.provider)

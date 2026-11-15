@@ -376,6 +376,26 @@ class MemoryService:
             return [{"role":"user","content":canonical(context).decode()},*[x for i in sorted(rendered) for x in rendered[i]]]
 
         messages = compose()
+        live_trace=None;live_floor=-1;live_frozen={}
+        if m.get('context_compaction'):
+            from ..live_compact_state import LiveProjection
+            live=LiveProjection(self.store,self.runtime)
+            prefix=[messages[0]]
+            history_budget=available-coordinator.estimate(system,prefix,tools)
+            if old_head:
+                # Existing semantic heads retain their original lineage and
+                # cutoff; never compact an index or summarize a live card.
+                live_trace={'reason':'SEMANTIC_HEAD_PRESENT','cuts':[],'head':None,
+                            'fence':live.fence(run_id)}
+            else:
+                bounded,live_trace=live.project(run_id,bounded,system=system,tools=tools,
+                    serialize=self.serialized,available_history=history_budget,
+                    scale=coordinator.scale,prefix_messages=prefix,
+                    fits_limit=lambda view:coordinator.estimate(system,view,tools)<=available)
+                if live_trace.get('head'):
+                    live_floor=live_trace['head']['group_end']
+                    live_frozen={i:g for i,g in enumerate(bounded) if i<=live_floor}
+                retained=list(bounded);messages=compose()
         budget_attempts.append(asdict(coordinator.measure(system,messages,tools,approved_guidance)))
         # Remove optional retrieval before touching protocol history or required state.
         while hits and coordinator.estimate(system,messages,tools) > available:
@@ -392,6 +412,8 @@ class MemoryService:
             position=0;bounded=[]
             for group_index,group in enumerate(complete):
                 self.runtime.check_wall(run_id,"prepare")
+                if group_index in live_frozen:
+                    bounded.append(live_frozen[group_index]);position+=len(group);continue
                 projected=[]
                 for message in group:
                     # Keep the latest complete observation at the normal allowance.
@@ -407,6 +429,8 @@ class MemoryService:
         verified_rebase=(self.profile.protocol_rebase_verified and (m['model_config_digest'] in self.profile.protocol_rebase_profile_digests or digest(model_configuration(native)) in self.profile.protocol_rebase_profile_digests)
                          and digest(tools) in self.profile.protocol_rebase_tool_digests)
         if need:
+            if live_floor>=0:
+                raise RepoError('CONTEXT_BUDGET_EXCEEDED','semantic compaction cannot cross a committed live checkpoint')
             opaque = any(message.get("reasoning_content") is not None or any(b.get("type") not in {"text","tool_use"} for b in message.get("native_blocks",[])) for message in raw)
             if opaque and not verified_rebase: raise RepoError("PROTOCOL_REBASE_UNVERIFIED")
             # Only closed groups are removed; an open group raises before this point.
@@ -455,6 +479,8 @@ class MemoryService:
         for group in complete:offsets.append(position);position+=len(group)
         working_trace=[];working_fill_attempts=0
         for index in working:
+            if index<=live_floor:
+                working_trace.append({'group_index':index,'status':'LIVE_CHECKPOINT_FROZEN'});continue
             group=complete[index];is_covered=index<len(complete)-len(retained)
             opaque=any(message.get('reasoning_content') is not None or any(b.get('type') not in {'text','tool_use'} for b in message.get('native_blocks',[])) for message in group)
             if is_covered and opaque and not verified_rebase:
@@ -473,7 +499,7 @@ class MemoryService:
                 # Work evidence takes priority over optional hits/old excerpts.
                 hits=[];observation_budget=0
                 start=len(complete)-len(retained)
-                retained=[g if i in working or i in evidence_overlay else
+                retained=[g if i<=live_floor or i in working or i in evidence_overlay else
                     [externalize(message,records[offsets[i]+j],160) for j,message in enumerate(complete[i])]
                     for i,g in enumerate(retained,start=start)]
                 if fits(group):accepted=group
@@ -532,6 +558,10 @@ class MemoryService:
         with self.store.tx() as c:self.repo.derive(request_ref,[envelope_ref],c)
         self.repo.put("context_requests",manifest["turn_request_id"],{"manifest":manifest,"envelope_ref":envelope_ref,"request_ref":request_ref,"usage":{},'usage_status':'PENDING'})
         self.store.put("projection",run_id,{"schema_version":2,"manifest":manifest,"estimated_tokens":estimated,"estimate_only":True,'working_evidence':working_trace})
+        if live_trace:
+            projection=self.store.get('projection',run_id);projection['live_compact']=live_trace
+            self.store.put('projection',run_id,projection)
+            live.assert_current(run_id,live_trace)
         mark("commit_projection")
         return system,messages,manifest
 

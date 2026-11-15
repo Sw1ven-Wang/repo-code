@@ -16,7 +16,7 @@ async def run(args):
         options['reasoning_effort']=args.reasoning_effort
     provider=(OpenAIProvider if args.provider=='openai' else AnthropicProvider)(args.model,**options)
     try:
-        app=RepoCode(args.state,provider,args.sandbox,args.image)
+        app=RepoCode(args.state,provider,args.sandbox,args.image,context_compaction=args.context_compaction)
         workspace=Path(args.workspace)
         if workspace.exists() and any(workspace.iterdir()):raise ValueError('Use a new/empty smoke workspace')
         workspace.mkdir(parents=True,exist_ok=True)
@@ -34,6 +34,7 @@ def main():
     p.add_argument('--provider',choices=['openai','anthropic'],required=True);p.add_argument('--model',required=True)
     p.add_argument('--base-url');p.add_argument('--state',type=Path,required=True);p.add_argument('--workspace',type=Path,required=True)
     p.add_argument('--api-key-env');p.add_argument('--reasoning-effort',choices=['none','minimal','low','medium','high','xhigh'])
+    p.add_argument('--context-compaction',choices=['legacy','live-experimental'],default='legacy')
     p.add_argument('--sandbox',choices=['native','docker'],required=True);p.add_argument('--image')
     return asyncio.run(run(p.parse_args()))
 if __name__=='__main__':raise SystemExit(main())

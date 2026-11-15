@@ -54,6 +54,8 @@ def parser():
     p.add_argument('--max-output-tokens',type=int)
     p.add_argument('--temperature',type=float)
     p.add_argument('--memory-profile',type=Path,help='Explicit Memory v2 profile for new Runs; required unchanged on resume')
+    p.add_argument('--context-compaction',choices=['legacy','live-experimental'],default='legacy',help='Opt-in local history projection; fixed for each Run')
+    p.add_argument('--live-compact-profile',type=Path,help='Optional JSON live projection profile; required unchanged on resume')
     p.add_argument('--mcp-config',type=Path,help='Operator-owned legacy stdio MCP profiles; native sandbox only')
     sub=p.add_subparsers(dest='command',required=True)
     auth=sub.add_parser('auth',help='ChatGPT plan authorization, independent of Codex login')
@@ -155,7 +157,9 @@ async def dispatch(args):
         draft=await draft_contract(model,args.goal,load(args.interface) if args.interface else None)
         atomic_write(args.output,json.dumps(draft.model_dump(mode='json'),ensure_ascii=False,indent=2).encode());output({'draft':str(args.output),'status':'REQUIRES_OPERATOR_REVIEW'});return 0
     app=RepoCode(args.state_root,model,args.sandbox,args.image,on_delta=(lambda text:print(text,end='',file=sys.stderr,flush=True)) if getattr(args,'stream',False) else None,
-                 memory_profile=load(args.memory_profile) if args.memory_profile else None)
+                 memory_profile=load(args.memory_profile) if args.memory_profile else None,
+                 context_compaction=args.context_compaction,
+                 live_compact_profile=load(args.live_compact_profile) if args.live_compact_profile else None)
     mcp_servers=[]
     try:
         cmd=args.command

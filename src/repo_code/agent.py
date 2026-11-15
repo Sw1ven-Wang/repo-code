@@ -347,10 +347,13 @@ class CodingAgent:
                             system_suffix+=capability_protocol+'\nPreviously offered portable guidance awaiting evidence binding (not authority or application proof): '+json.dumps(pending_bindings,ensure_ascii=False)
                 memory=getattr(self,"memory",None) if run["data"]["manifest"].get("memory_schema_version")==2 else None
                 request_manifest=None
+                live_token=None
                 self.runtime.check_wall(run_id,"prepare")
                 if memory:
                     system,messages,request_manifest=await memory.prepare_context(run_id,tools,system_suffix,config,memory_cfg)
                 else:system,messages=self.context.build(run_id,tools,config,memory_cfg,system_suffix=system_suffix)
+                if run['data']['manifest'].get('context_compaction'):
+                    live_token=(self.store.get('projection',run_id) or {}).get('live_compact')
                 from .context import estimate_tokens
                 if not memory:
                     from .memory.budget import ContextBudgetCoordinator
@@ -359,12 +362,20 @@ class CodingAgent:
                 reservation=memory.reserve_main(request_manifest) if memory else None
                 started=time.monotonic();usage={};dispatched=False
                 try:
+                    if live_token:
+                        from .live_compact_state import LiveProjection
+                        live=LiveProjection(self.store,self.runtime)
+                        live.assert_current(run_id,live_token)
                     self.runtime.consume(run_id,"model_calls")
                     if memory:
                         from .memory.budget import ContextBudgetCoordinator
                         b=request_manifest['budget_breakdown']
                         ContextBudgetCoordinator(self.provider,b['max_effective_window'],b['reserved_output'],b['safety_margin'],b['provider_profile_digest']).assert_fits(system,messages,tools,system_suffix)
                     request_timeout=self.runtime.check_wall(run_id,"dispatch")
+                    if live_token:
+                        live.assert_current(run_id,live_token)
+                        serialized=(self.provider.build_request(system,messages,tools)[0] if hasattr(self.provider,'build_request') else {'system':system,'messages':messages,'tools':tools})
+                        live.record_request(run_id,serialized)
                     dispatched=True
                     deadline = asyncio.timeout(request_timeout)
                     try:
@@ -377,6 +388,10 @@ class CodingAgent:
                             raise self.runtime.budget_error(self.runtime.run(run_id),"wall_seconds","model_wait","DISPATCHED_OR_UNKNOWN") from exc
                         raise
                     usage=reply.usage
+                    if live_token:
+                        metric=self.store.get('live_compact_request',run_id)
+                        metric['usage']=usage
+                        self.store.put('live_compact_request',run_id,metric)
                 except Exception as exc:
                     if isinstance(exc,ProviderNotDispatched):dispatched=False
                     usage=getattr(exc,'usage',usage)
