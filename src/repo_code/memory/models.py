@@ -158,6 +158,7 @@ class RequestContextManifest(Contract):
     working_state_digest: str
     summary_node_ids: list[str]
     summary_cutoff: int
+    summary_segments: list[dict[str, Any]] = Field(default_factory=list)
     retrieval_trace_digest: str
     selected_memory_ids_versions: list[dict[str, Any]]
     tool_schema_digest: str

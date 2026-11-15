@@ -33,10 +33,12 @@ async def test_restart_and_repeated_build_have_identical_cards_and_monotonic_hea
     engine=ContextEngine(app.store,app.runtime);first=engine.build(run['id'],[],{'max_tokens':32000})
     old=app.store.get('live_compact_head',run['id'])
     second=engine.build(run['id'],[],{'max_tokens':32000})
-    assert first[1]==second[1]
+    # Runtime feedback is a separately labeled trailing message; its wall-clock
+    # budget changes. The projected protocol history must replay identically.
+    assert first[1][:-1]==second[1][:-1]
     assert app.store.get('projection',run['id'])['live_compact']['reason']=='UNCHANGED_SNAPSHOT'
     restarted=RepoCode(tmp_path/'host',ScriptedProvider(),sandbox='local',context_compaction='live-experimental',live_compact_profile=low_profile())
-    assert ContextEngine(restarted.store,restarted.runtime).build(run['id'],[],{'max_tokens':32000})[1]==first[1]
+    assert ContextEngine(restarted.store,restarted.runtime).build(run['id'],[],{'max_tokens':32000})[1][:-1]==first[1][:-1]
     assert restarted.store.get('live_compact_head',run['id'])==old
     assert len(restarted.store.values('live_compact_cut'))==1
 
@@ -91,6 +93,9 @@ async def test_native_prefix_metric_is_not_a_cache_hit(tmp_path):
     metric=live.record_request(run['id'],{'messages':['abcd']})
     assert metric['common_prefix_bytes']>0 and not metric['cache_hit_inferred']
     assert metric['usage'] is None
+    attempts=sorted(app.store.values('live_compact_request_attempt'),key=lambda x:x['sequence'])
+    assert [r['sequence'] for r in attempts]==[1,2]
+    assert attempts[1]['previous_attempt_id']==attempts[0]['id']
 
 
 @pytest.mark.parametrize('mode',['legacy','live-experimental'])

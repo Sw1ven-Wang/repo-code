@@ -20,7 +20,7 @@ trials now inherit their parent service's compaction mode and profile.
 All new tests use local fixtures or scripted providers. No paid model calls or
 official SWE-bench gold patches/hidden grading material are required.
 
-## Offline publication checks (2026-11-15)
+## Initial offline publication checks (2026-11-15, `85939f8`)
 
 | Check | Result |
 | --- | --- |
@@ -51,6 +51,37 @@ added setuptools 72.1.0 and wheel 0.45.1 to a disposable container, then verifie
 by prior compilation. Existing declared distribution paths were retained when
 refreshing the hash manifest.
 
+## Review corrections
+
+Checkpoint protection now applies to the committed prefix only. Memory v1 can
+fold complete tail groups into an index after that prefix. Memory v2.1 maintains
+independent semantic heads over disjoint raw-source tails, and new local cuts
+start after existing semantic coverage. Semantic CAS also fences the live head
+and authorization; request admission includes all segment node IDs.
+
+The planner can join adjacent small groups and pointerize oversized successful
+results. Under request pressure, it can advance through at most `max_cuts`
+eligible spans (default four) before fallback. Failed/uncertain observations
+remain ineligible. Model explanations are retained as bounded, quoted,
+unverified proposals separate from Host receipts.
+
+Per-attempt request records retain dispatch outcome, usage (including known
+usage on failure), serialized prefix measurements and projection work counts.
+The [protocol capability matrix](LIVE_COMPACT.md#protocol-capability-matrix)
+states the current safe subset; opaque reasoning/native blocks remain skipped.
+
+The review regressions include 300 additional real Broker tool groups after a
+checkpoint, joint-span replay, oversized results, bounded multiple cuts,
+Live/semantic/Live/semantic continuation, restart and revocation, stale semantic
+commits, stable system prefixes and known usage on failed model attempts.
+In the Linux review run, the 300-group scenario took 54 seconds; measured
+preparation at 20/160/300 groups took 0.17/0.88/1.00 seconds on that test host.
+These are synthetic regression measurements, not real-model performance gains.
+Full native validation and wheel checks are also run by the repository's
+`Linux offline integration` workflow on each PR head. Final review results are
+recorded in the PR checks and description; the table above describes the
+initial publication commit only.
+
 ## Experimental limits
 
 - Real-model A/B/C/D cohorts, repeated trials, quality/transfer gates and the
@@ -59,14 +90,16 @@ refreshing the hash manifest.
 - Native token estimates, serialized common-prefix bytes and real provider
   usage are different measurements. A stable prefix is never reported as a
   cache hit.
-- Each settled snapshot can commit at most one card; candidate selection
-  considers at most 64 recent group slots by default. This conservative first
-  version does not implement multi-cut maintenance.
+- Candidate selection considers at most 64 recent group slots by default.
+  Snapshot validation, checkpoint reconstruction and fencing still scan history;
+  this is not an O(1) or demonstrated low-latency implementation.
 - Local cuts skip opaque native reasoning/block protocols. A committed live
-  checkpoint cannot be crossed by semantic compaction or legacy refolding;
-  insufficient remaining context fails closed.
+  checkpoint cannot be crossed by semantic compaction or legacy refolding.
+  Its right-hand tail remains eligible; a mandatory prefix, current request or
+  retained decisions that exceed the request window still fail closed.
 - The package version remains 1.5.1. The default remains `legacy`; no automatic
-  Release activation, main-branch merge or version tag is part of this change.
+  Release activation or version tag is part of this change. Merging this opt-in
+  implementation does not qualify it as a completed real-model experiment.
 
 Windows tests are a portability check. Linux native and Docker isolation are
 validated separately; skipped isolation checks cannot count as acceptance.

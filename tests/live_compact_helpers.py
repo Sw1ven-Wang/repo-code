@@ -22,15 +22,15 @@ def records(count=8, size=5400, result_changes=None):
     return rows
 
 
-async def history(tmp_path, *, memory_profile=None, count=8, provider=None, mode='live-experimental', profile=None):
+async def history(tmp_path, *, memory_profile=None, count=8, provider=None, mode='live-experimental', profile=None, budget=None, read_lines=500):
     source=tmp_path/'source';source.mkdir()
     for i in range(count):
         (source/f'f{i}.py').write_text(f'# file {i}\n'+'value = 42\n'*490,encoding='utf-8')
     app=RepoCode(tmp_path/'host',provider or ScriptedProvider(),sandbox='local',memory_profile=memory_profile,
                  context_compaction=mode,live_compact_profile=profile)
-    run=app.new_task('Keep the public API unchanged.',source,authorize_write=True)
+    run=app.new_task('Keep the public API unchanged.',source,authorize_write=True,budget=budget)
     for i in range(count):
-        call=ToolCall(id=f'c{i}',name='read',arguments={'path':f'f{i}.py','lines':500})
+        call=ToolCall(id=f'c{i}',name='read',arguments={'path':f'f{i}.py','lines':read_lines})
         app.store.append_message(run['id'],{'role':'assistant','content':'','tool_calls':[call.model_dump(exclude_none=True)]})
         request=app.broker.register_call(run['id'],f't{i}',call)
         receipt=await app.broker.submit(request)

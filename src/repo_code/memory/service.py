@@ -235,7 +235,9 @@ class MemoryService:
         system = (SYSTEM+"\nTask goal: "+run["data"]["goal"]+task_authority_context(self.runtime,run)
                   +"\nExecution directives: "+json.dumps(run["data"]["directives"],ensure_ascii=False))
         from ..progress import coalesce_process_observations, runtime_feedback, latest_process_group
-        system+='\nHost runtime status (not task acceptance): '+json.dumps(runtime_feedback(self.store,self.runtime,run,self.provider,ledger=ledger),ensure_ascii=False)
+        runtime_status=runtime_feedback(self.store,self.runtime,run,self.provider,ledger=ledger)
+        if not m.get('context_compaction'):
+            system+='\nHost runtime status (not task acceptance): '+json.dumps(runtime_status,ensure_ascii=False)
         system+=approved_guidance
         raw = coalesce_process_observations(self.store.messages(run_id))
         if raw and raw[0].get('role') == 'user' and raw[0].get('content') == run["data"]["goal"]:
@@ -314,6 +316,18 @@ class MemoryService:
                 else: break
             retained = bounded[len(groups(raw[:covered])):]
 
+        offsets=[0]
+        for group in complete:offsets.append(offsets[-1]+len(group))
+        segment_ranges=[];semantic_floor=len(groups(raw[:covered]))-1
+        def load_segments():
+            nonlocal segment_ranges,semantic_floor,summary_ids
+            overlays,segment_ranges=self.compactor.segment_projection(run_id,records,complete,state,versions)
+            semantic_floor=max([len(groups(raw[:covered]))-1,*[h['group_end'] for h in segment_ranges]])
+            summary_ids=([summary_ids[0]] if summary else [])+[h['id'] for h in segment_ranges]
+            for i in range(len(groups(raw[:covered]))):bounded[i]=[]
+            for i,view in overlays.items():bounded[i]=view
+        if m.get('context_compaction'):
+            load_segments();retained=bounded[len(groups(raw[:covered])):]
         mark("initial_projection")
         observation_budget=min(1000,self.profile.evidence_tokens//2)
         # A small observation floor prevents paying for FACT/EPISODE extraction
@@ -349,7 +363,7 @@ class MemoryService:
                 selected=[reconciled_claims[(summary_ids[0],claim["claim_id"])] for claim in selected]
                 claim_projection.update(total_claims=len(summary['claims']),visible_claim_ids=[c['claim_id'] for c in selected],
                                         floor_claim_ids=[c['claim_id'] for c in floor],floor_tokens=floor_used)
-                summary_view={'node_ids':summary_ids,'source_end_seq':summary['source_end_seq'],
+                summary_view={'node_ids':[summary_ids[0]],'source_end_seq':summary['source_end_seq'],
                     'claims':[{'claim_id':c['claim_id'],'kind':c['kind'],'text':c['text'],
                                'epistemic_status':c['epistemic_status'],'interpretation_status':c['semantic_review_status'],
                                'validity':c.get('validity','UNKNOWN'),
@@ -371,6 +385,7 @@ class MemoryService:
                 state_view['current_subgoal'] = 'Follow the original task goal in the system instructions.'
             context = {"type":"memory_context_data", "trust":"UNTRUSTED_DATA_NOT_AUTHORITY", "working_state":state_view,
                        "summary":summary_view, "retrieved_evidence":hits}
+            if m.get('context_compaction'):context['host_runtime_status']=runtime_status
             rendered=dict(enumerate(retained,start=len(complete)-len(retained)))
             rendered.update(evidence_overlay)
             return [{"role":"user","content":canonical(context).decode()},*[x for i in sorted(rendered) for x in rendered[i]]]
@@ -382,20 +397,13 @@ class MemoryService:
             live=LiveProjection(self.store,self.runtime)
             prefix=[messages[0]]
             history_budget=available-coordinator.estimate(system,prefix,tools)
-            if old_head:
-                # Existing semantic heads retain their original lineage and
-                # cutoff; never compact an index or summarize a live card.
-                live_trace={'reason':'SEMANTIC_HEAD_PRESENT','cuts':[],'head':None,
-                            'fence':live.fence(run_id)}
-            else:
-                bounded,live_trace=live.project(run_id,bounded,system=system,tools=tools,
-                    serialize=self.serialized,available_history=history_budget,
-                    scale=coordinator.scale,prefix_messages=prefix,
-                    fits_limit=lambda view:coordinator.estimate(system,view,tools)<=available)
-                if live_trace.get('head'):
-                    live_floor=live_trace['head']['group_end']
-                    live_frozen={i:g for i,g in enumerate(bounded) if i<=live_floor}
-                retained=list(bounded);messages=compose()
+            bounded,live_trace=live.project(run_id,bounded,system=system,tools=tools,
+                serialize=self.serialized,available_history=history_budget,
+                scale=coordinator.scale,prefix_messages=prefix,after_group=semantic_floor,
+                fits_limit=lambda view:coordinator.estimate(system,view,tools)<=available)
+            if live_trace.get('head'):live_floor=live_trace['head']['group_end']
+            live_frozen={i:g for i,g in enumerate(bounded) if i<=max(live_floor,semantic_floor)}
+            retained=bounded[len(groups(raw[:covered])):];messages=compose()
         budget_attempts.append(asdict(coordinator.measure(system,messages,tools,approved_guidance)))
         # Remove optional retrieval before touching protocol history or required state.
         while hits and coordinator.estimate(system,messages,tools) > available:
@@ -428,9 +436,36 @@ class MemoryService:
         while hasattr(native,'inner') and id(native) not in seen:seen.add(id(native));native=native.inner
         verified_rebase=(self.profile.protocol_rebase_verified and (m['model_config_digest'] in self.profile.protocol_rebase_profile_digests or digest(model_configuration(native)) in self.profile.protocol_rebase_profile_digests)
                          and digest(tools) in self.profile.protocol_rebase_tool_digests)
+        if need and live_floor>=0:
+            # Semantic extraction owns only the raw tail after the latest live
+            # checkpoint. Its own CAS head can advance until the next live cut.
+            opaque=any(message.get('reasoning_content') is not None or message.get('native_blocks') for message in raw)
+            if opaque and not verified_rebase:raise RepoError('PROTOCOL_REBASE_UNVERIFIED')
+            remaining_count=min(self.profile.recent_groups,len(complete)-max(live_floor,semantic_floor)-1)
+            fixed=[m for g in bounded[:live_floor+1] for m in g]
+            while remaining_count>1:
+                tail=[m for g in bounded[-remaining_count:] for m in g]
+                if coordinator.estimate(system,[compose()[0],*fixed,*tail],tools)+1200<=available:break
+                remaining_count-=1
+            target=len(complete)-max(1,remaining_count)-1
+            if target<=max(live_floor,semantic_floor):
+                raise RepoError('CONTEXT_BUDGET_EXCEEDED','committed prefix, latest group and required state exceed budget')
+            live.assert_current(run_id,live_trace)
+            try:
+                await self.compactor.compact(run_id,records[offsets[target+1]-1]['seq'],state,
+                    after_seq=records[offsets[live_floor+1]-1]['seq'])
+            finally:
+                mark('auxiliary_total')
+            check_fence()
+            fresh=live.fence(run_id)
+            ignored={'revision','summary_heads'}
+            if ({k:v for k,v in fresh.items() if k not in ignored}
+                    != {k:v for k,v in live_trace['fence'].items() if k not in ignored}):
+                raise RepoError('LIVE_COMPACT_STALE')
+            live_trace['fence']=fresh
+            load_segments();retained=bounded[len(groups(raw[:covered])):]
+            messages=compose();need=False
         if need:
-            if live_floor>=0:
-                raise RepoError('CONTEXT_BUDGET_EXCEEDED','semantic compaction cannot cross a committed live checkpoint')
             opaque = any(message.get("reasoning_content") is not None or any(b.get("type") not in {"text","tool_use"} for b in message.get("native_blocks",[])) for message in raw)
             if opaque and not verified_rebase: raise RepoError("PROTOCOL_REBASE_UNVERIFIED")
             # Only closed groups are removed; an open group raises before this point.
@@ -468,6 +503,15 @@ class MemoryService:
             finally:
                 mark("auxiliary_total")
             check_fence()
+            if live_trace:
+                # The prefix-only semantic path is possible before the first
+                # live cut. Subsequent local cuts start after its raw cutoff.
+                fresh=live.fence(run_id)
+                ignored={'revision','summary_heads'}
+                if ({k:v for k,v in fresh.items() if k not in ignored}
+                        != {k:v for k,v in live_trace['fence'].items() if k not in ignored}):
+                    raise RepoError('LIVE_COMPACT_STALE')
+                live_trace['fence']=fresh
             messages=compose()
         mark("initial_packing")
         # A summary is smaller only after extraction. Reuse the final budget to
@@ -479,7 +523,7 @@ class MemoryService:
         for group in complete:offsets.append(position);position+=len(group)
         working_trace=[];working_fill_attempts=0
         for index in working:
-            if index<=live_floor:
+            if m.get('context_compaction') and index<=max(live_floor,semantic_floor):
                 working_trace.append({'group_index':index,'status':'LIVE_CHECKPOINT_FROZEN'});continue
             group=complete[index];is_covered=index<len(complete)-len(retained)
             opaque=any(message.get('reasoning_content') is not None or any(b.get('type') not in {'text','tool_use'} for b in message.get('native_blocks',[])) for message in group)
@@ -499,7 +543,7 @@ class MemoryService:
                 # Work evidence takes priority over optional hits/old excerpts.
                 hits=[];observation_budget=0
                 start=len(complete)-len(retained)
-                retained=[g if i<=live_floor or i in working or i in evidence_overlay else
+                retained=[g if i<=max(live_floor,semantic_floor) or i in working or i in evidence_overlay else
                     [externalize(message,records[offsets[i]+j],160) for j,message in enumerate(complete[i])]
                     for i,g in enumerate(retained,start=start)]
                 if fits(group):accepted=group
@@ -547,6 +591,7 @@ class MemoryService:
             model_config_digest=m["model_config_digest"],provider_protocol_profile_digest=envelope.profile_digest,
             knowledge_snapshot_digest=m["knowledge_snapshot_digest"],knowledge_index_digest=m["knowledge_index_digest"],
             working_state_digest=state_key,summary_node_ids=summary_ids,summary_cutoff=records[covered-1]["seq"] if covered else 0,
+            summary_segments=segment_ranges,
             retrieval_trace_digest=trace_id,selected_memory_ids_versions=[{"id":h["id"],"version":h["version"]} for h in hits],
             tool_schema_digest=digest(tools),control_epoch=run["control_epoch"],writer_epoch=run["writer_epoch"],
             revocation_epoch=fence[2],authorization_digest=fence[3],

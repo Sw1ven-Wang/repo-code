@@ -360,7 +360,7 @@ class CodingAgent:
                     ContextBudgetCoordinator(self.provider,config['max_tokens'],max(config['reserve_tokens'],getattr(self.provider,'max_tokens',None) or 0),max(0,int(config.get('safety_tokens',0)))).assert_fits(system,messages,tools,system_suffix)
                 response_epoch=run["control_epoch"]
                 reservation=memory.reserve_main(request_manifest) if memory else None
-                started=time.monotonic();usage={};dispatched=False
+                started=time.monotonic();usage={};dispatched=False;live_attempt=None;live_failed=False
                 try:
                     if live_token:
                         from .live_compact_state import LiveProjection
@@ -375,7 +375,7 @@ class CodingAgent:
                     if live_token:
                         live.assert_current(run_id,live_token)
                         serialized=(self.provider.build_request(system,messages,tools)[0] if hasattr(self.provider,'build_request') else {'system':system,'messages':messages,'tools':tools})
-                        live.record_request(run_id,serialized)
+                        live_attempt=live.record_request(run_id,serialized,projection=live_token)
                     dispatched=True
                     deadline = asyncio.timeout(request_timeout)
                     try:
@@ -388,16 +388,16 @@ class CodingAgent:
                             raise self.runtime.budget_error(self.runtime.run(run_id),"wall_seconds","model_wait","DISPATCHED_OR_UNKNOWN") from exc
                         raise
                     usage=reply.usage
-                    if live_token:
-                        metric=self.store.get('live_compact_request',run_id)
-                        metric['usage']=usage
-                        self.store.put('live_compact_request',run_id,metric)
                 except Exception as exc:
+                    live_failed=True
                     if isinstance(exc,ProviderNotDispatched):dispatched=False
                     usage=getattr(exc,'usage',usage)
                     with self.store.tx() as c:self.store.emit(c,run_id,'model.failed',{'code':getattr(exc,'code',type(exc).__name__),'usage':usage,'provider_details':getattr(exc,'provider_details',{}),'budget_stop':getattr(exc,'budget_stop',None)},run['data']['visibility'])
                     raise
                 finally:
+                    if live_attempt:
+                        live.settle_request(live_attempt,usage,time.monotonic()-started,
+                                            dispatched=dispatched,failed=live_failed)
                     if memory:
                         elapsed=time.monotonic()-started
                         if dispatched:

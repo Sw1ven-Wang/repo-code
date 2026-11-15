@@ -20,15 +20,24 @@ authorization, manifest, operations and revocations. Crash recovery aborts
 uncommitted auxiliary records and retries deterministically; committed cards are
 idempotent.
 
-Memory v2.1 can use the projection during request packing, after original-source
-Working State and retrieval preparation and before semantic compaction. Existing
-semantic checkpoints are hard boundaries. Local cuts skip ChatGPT-plan Responses,
-native reasoning and Anthropic blocks; no native rebase support is claimed.
+Memory v2.1 uses the projection during request packing, after original-source
+Working State and retrieval preparation. Prefix summaries and live checkpoints
+are boundaries, not permanent mode switches. Under pressure, a separate semantic
+head summarizes only original closed groups after the latest live checkpoint.
+New live cuts start after all semantic coverage. Segment heads have independent
+CAS, revocation and source-hash checks; summaries never consume live cards.
+Memory v1 may fold complete groups after its checkpoint into a diagnostic index
+inserted after the frozen prefix. Neither path rewrites the committed prefix.
 
 The default profile triggers when history exceeds 60% of the available history
 budget and the forecast exceeds 75%. It preserves three recent tool groups,
-considers at most 64 recent group slots, and commits at most one card per new
-settled snapshot. A card must be smaller under the native request serializer.
+considers at most 64 recent group slots. It normally commits one card; under
+request pressure it selects earlier eligible groups and can commit up to four
+cards per settled snapshot (configurable `max_cuts`, 1–8). Adjacent small groups
+can share a card, and oversized successful results can use complete-source
+reference cards. Every replacement must be smaller under the native serializer.
+Failures and unknown results remain ineligible. Quoted assistant hypotheses
+are separately labeled `MODEL_PROPOSED` / `UNVERIFIED`, never Host facts.
 Use `--live-compact-profile path.json` or the SDK's `live_compact_profile` for
 explicit overrides; the complete profile and its digest are pinned at Run creation.
 Resume requires the same mode and profile. Isolated benchmark trials inherit
@@ -41,10 +50,27 @@ python -m repo_code.cli --provider openai --model gpt-6.1-terra `
 ```
 
 Estimated native tokens, real Provider Usage, common serialized prefix and
-cache fields are recorded as separate measurements. A common prefix is not a
-cache hit or a cost claim. Use fresh state roots for A/B groups. Paid benchmark
+cache fields are recorded as separate measurements. Each main request attempt
+has its own record, including known usage on failures and dispatch status.
+A sequence number and previous-attempt ID preserve ordering. In Live mode,
+changing runtime budget feedback is carried as context data rather than in
+the system prompt; this is not proof of provider cache reuse.
+A common prefix is not a cache hit or a cost claim. Use fresh state roots for A/B groups. Paid benchmark
 runs require `--i-understand-api-costs`; preflight is free. Windows is partial;
 Linux native and Docker results are reported independently.
+
+## Protocol capability matrix
+
+| History envelope | Local Live Cut | Validation |
+| --- | --- | --- |
+| Plain chat text and paired function calls | Supported | Scripted and OpenAI-compatible native serialization, including DeepSeek plain chat |
+| `reasoning_content`, including an empty value | Skipped for the whole history | Opaque reasoning is never removed or linked by a text heuristic |
+| ChatGPT-plan native Responses blocks | Skipped for the whole history | No verified Responses reasoning/call-ID rebase capability |
+| Anthropic native content/thinking/tool blocks | Skipped for the whole history | No verified native block/signature rebase capability |
+| Unknown fields or non-text content | Skipped | Fail-closed protocol gate |
+
+Serialization alone is not evidence of safe protocol rebasing. Unsupported
+envelopes remain intact; a local skip does not certify semantic rebasing.
 
 ```powershell
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'
