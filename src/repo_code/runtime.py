@@ -58,6 +58,7 @@ class Runtime:
             "environment_digest":self.sandbox.environment_digest if self.sandbox else digest({"sandbox":"none"}),"model_config_digest":digest(model_config or {}),"budget":budget.model_dump(),"scope":scope}
         # A successor inherits implementation bytes, NOT the integration target.
         if conversation:manifest['conversation_mode']=True
+        if getattr(self,'context_compaction',None):manifest['context_compaction']=self.context_compaction
         # The user directory and its baseline remain fixed through the lineage.
         origin = integration_origin or {"path":str(source), "baseline":baseline}
         manifest["integration_origin_digest"] = digest(origin)

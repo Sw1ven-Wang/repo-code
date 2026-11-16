@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Continue tail folding after a live checkpoint; add separately fenced raw-tail semantic segments for Memory v2.1 and allow later live cuts after summaries. Support joint small-group cards, oversized result pointers and bounded pressure maintenance. Preserve labeled model hypotheses, record every main request attempt, and move changing live budget feedback out of the system prefix. Add 300-group continuation, lifecycle, recovery and revocation regressions; retain the default `legacy` and experimental status.
+
+- Add opt-in deterministic live context projection for Memory v1/v2, with immutable source references, checkpoint/control fences, crash recovery and benchmark profile inheritance. Keep the default `legacy`; this is experimental and does not establish model quality, cache or cost gains. See [Live Compact](docs/LIVE_COMPACT.md).
+
 - Add a shared bounded work/validation ledger and safe public-baseline `workspace.diff`; make delivery guidance effective while keeping external handoffs PARTIAL. Replace recursive v1 history dumps with stable group indexes and supplement exact repetition guards with versioned cross-tool coverage and bounded same-state recovery.
 - Preserve current-candidate checks and a bounded FACT/EPISODE floor in Memory v2 projections. Add early SWE candidate-policy feedback, deterministic malformed-YAML rejection, capability-filtered tools, recorded all-purpose budget feedback, structural command metrics, and versioned continuous-task stage/terminal calibration controls. Historical experiments and scores remain immutable.
 

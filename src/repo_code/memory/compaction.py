@@ -29,6 +29,43 @@ class SemanticCompactor:
         self.repo, self.runtime, self.provider, self.profile = repository, runtime, provider, profile
         self.history = History(repository, runtime)
 
+    def segment_projection(self, run_id, records, complete, state, versions):
+        """Render disjoint raw-source summaries without interpreting live cards."""
+        heads=self.repo.get('memory_control','summary_segments:'+run_id,default={'heads':[]})['heads']
+        overlays={};ranges=[];ends=[];position=0
+        for group in complete:
+            position+=len(group);ends.append(records[position-1]['seq'])
+        for head in heads:
+            self.repo.check([head['id']])
+            node=self.repo.get('summary_nodes',head['id'])
+            source=[r for r in records if head['after_seq']<r['seq']<=head['cutoff']]
+            if (not node or not source or node['run_id']!=run_id
+                    or digest(node)!=head['id'] or digest(source)!=node['source_prefix_digest']
+                    or node['source_start_seq']!=source[0]['seq'] or node['source_end_seq']!=head['cutoff']):
+                raise RepoError('SUMMARY_SEGMENT_CORRUPT')
+            start=next((i for i,end in enumerate(ends) if end>head['after_seq']),len(ends))
+            end=next((i for i,seq in enumerate(ends) if seq==head['cutoff']),-1)
+            if (start>end or (start and ends[start-1]!=head['after_seq'])
+                    or any(i in overlays for i in range(start,end+1))):
+                raise RepoError('SUMMARY_SEGMENT_BOUNDARY')
+            required=[c for c in node['claims'] if c['kind'] in {'DECISION','USER_PREFERENCE','HYPOTHESIS','PROCEDURE'}]
+            optional=[c for c in node['claims'] if c not in required]
+            selected=[*required,*optional[-2:]]
+            claims=[]
+            for claim in selected:
+                value=self.reconcile(claim,records,state,versions)
+                claims.append({k:value[k] for k in ('claim_id','kind','text','epistemic_status','validity','semantic_review_status','conflict_status','conflict_refs') if k in value})
+                claims[-1]['source_ids']=[r['source_id'] for r in value['support_refs']]
+            view={'type':'memory_segment_data','trust':'UNTRUSTED_DATA_NOT_AUTHORITY',
+                  'node_id':head['id'],'source_start_seq':source[0]['seq'],'source_end_seq':head['cutoff'],
+                  'claims':claims,'open_loop_ids':node['open_loop_ids'],
+                  'omitted_observation_count':len(node['claims'])-len(selected),
+                  'retrieve_sources_with':'history.expand'}
+            overlays[start]=[{'role':'user','content':canonical(view).decode()}]
+            for i in range(start+1,end+1):overlays[i]=[]
+            ranges.append({**head,'group_start':start,'group_end':end})
+        return overlays,ranges
+
     def reconcile(self,claim,records,state,file_versions=None):
         value=dict(claim)
         if file_versions is None:
@@ -46,10 +83,20 @@ class SemanticCompactor:
                 value['conflict_status']='CURRENT_CORRECTION_REQUIRES_REVIEW'
         return value
 
-    def fence(self, run_id, records):
+    def fence(self, run_id, records, after_seq=0):
         run = self.runtime.run(run_id)
+        head_key = 'summary:'+run_id+(':after:'+str(after_seq) if after_seq else '')
+        live_head = self.repo.store.get('live_compact_head',run_id)
+        if live_head:
+            cut = self.repo.store.get('live_compact_cut',live_head['id'])
+            if not cut or after_seq != int(cut['source_message_ids'][-1]):
+                raise RepoError('SUMMARY_LIVE_BOUNDARY','Compact only raw sources after the latest live checkpoint')
+        elif after_seq:
+            raise RepoError('SUMMARY_LIVE_BOUNDARY')
         return {"run_id": run_id, "control": run["control_epoch"], "writer": run["writer_epoch"],
-                "revocation": self.repo.epoch(), "head": self.repo.get("memory_control", "summary:"+run_id),
+                'after_seq': after_seq, 'head_key': head_key, 'live_head': live_head,
+                'authorization': digest(run['data'].get('authorization',{})),
+                "revocation": self.repo.epoch(), "head": self.repo.get("memory_control", head_key),
                 "prefix": digest(records), "cutoff": records[-1]["seq"] if records else 0}
 
     def validate(self, proposal, records, state, old_claims):
@@ -171,10 +218,14 @@ class SemanticCompactor:
             run = self.runtime.run(run_id, c)
             if (run["control_epoch"], run["writer_epoch"], self.repo.epoch(c)) != (fence["control"], fence["writer"], fence["revocation"]):
                 raise RepoError("SUMMARY_STALE_FENCE")
-            if self.repo.get("memory_control", "summary:"+run_id, c) != fence["head"]: raise RepoError("SUMMARY_HEAD_CAS")
+            if (digest(run['data'].get('authorization',{})) != fence['authorization']
+                    or self.repo.store.get('live_compact_head',run_id,c) != fence['live_head']):
+                raise RepoError('SUMMARY_STALE_FENCE')
+            if self.repo.get("memory_control", fence['head_key'], c) != fence["head"]: raise RepoError("SUMMARY_HEAD_CAS")
             self.repo.check(raw_refs, c)
             # Verify immutable prefix in this transaction; a new tail is allowed.
-            rows = c.execute("SELECT id,data FROM messages WHERE run_id=? AND id<=? ORDER BY id", (run_id, fence["cutoff"])).fetchall()
+            rows = c.execute("SELECT id,data FROM messages WHERE run_id=? AND id>? AND id<=? ORDER BY id",
+                             (run_id, fence['after_seq'], fence["cutoff"])).fetchall()
             from .working_state import semantic_message
             if [digest(semantic_message(json.loads(r["data"]))) for r in rows] != raw_refs: raise RepoError("SUMMARY_PREFIX_CHANGED")
             self.repo.put("summary_nodes", node_id, node, c)
@@ -184,18 +235,27 @@ class SemanticCompactor:
                 ref=record['ref']
                 self.repo.derive(ref["content_digest"], [ref["source_id"],*record['artifact_dependencies']], c)
             head = {"id": node_id, "cutoff": fence["cutoff"], "revision": (fence["head"] or {}).get("revision", 0) + 1}
-            self.repo.put("memory_control", "summary:"+run_id, head, c, False)
+            self.repo.put("memory_control", fence['head_key'], head, c, False)
+            if fence['after_seq']:
+                key='summary_segments:'+run_id
+                heads=self.repo.get('memory_control',key,c,{'heads':[]})['heads']
+                heads=[h for h in heads if h['after_seq']!=fence['after_seq']]
+                if any(not (h['cutoff']<=fence['after_seq'] or fence['cutoff']<=h['after_seq']) for h in heads):
+                    raise RepoError('SUMMARY_SEGMENT_OVERLAP')
+                heads.append({**head,'after_seq':fence['after_seq']})
+                self.repo.put('memory_control',key,{'heads':sorted(heads,key=lambda h:h['after_seq'])},c,False)
             # Fixed-depth navigation. Leaf claims retain original evidence closure.
             index = {"level": "RUN_INDEX", "run_id": run_id, "children": [node_id], "open_loop_ids": node["open_loop_ids"]}
             self.repo.put("summary_nodes", digest(index), index, c)
             self.repo.derive(digest(index), [node_id], c)
         return node_id, node
 
-    async def compact(self, run_id, cutoff, state):
+    async def compact(self, run_id, cutoff, state, *, after_seq=0):
         self.runtime.check_wall(run_id,"auxiliary_prepare")
-        records = [r for r in self.history.records(run_id) if r["seq"] <= cutoff]
+        records = [r for r in self.history.records(run_id) if after_seq < r["seq"] <= cutoff]
+        if not records:raise RepoError('SUMMARY_EMPTY_SEGMENT')
         groups([r["message"] for r in records])
-        fence = self.fence(run_id, records)
+        fence = self.fence(run_id, records, after_seq)
         old_node = self.repo.get("summary_nodes", fence["head"]["id"]) if fence["head"] else None
         if fence['head'] and old_node is None:raise RepoError('SUMMARY_HEAD_MISSING')
         if old_node and fence["head"]["cutoff"] >= cutoff:

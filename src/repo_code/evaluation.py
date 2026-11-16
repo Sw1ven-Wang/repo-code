@@ -49,8 +49,10 @@ class TrialRunner:
                 target.commit()
             shutil.copy2(s.store.root/'host.key',state_root/'host.key')
             shutil.copytree(s.store.artifact_root,state_root/'artifacts')
+        compaction=getattr(s,'context_compaction',None) or {}
         app=RepoCode(state_root,provider,sandbox=s.sandbox.mode,image=s.sandbox.image,
-                     memory_profile=trial_profile,memory_encoder=memory.encoder if trial_profile and memory else None)
+                     memory_profile=trial_profile,memory_encoder=memory.encoder if trial_profile and memory else None,
+                     context_compaction=compaction.get('mode','legacy'),live_compact_profile=compaction.get('profile'))
         app.sandbox.kit=s.sandbox.kit
         app.agent.review_contract_tasks = self.review_contract_tasks
         app.agent.context_ceiling = self.context_ceiling
