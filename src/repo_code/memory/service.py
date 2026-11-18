@@ -105,6 +105,11 @@ class MemoryService:
                     manifest["control_epoch"],manifest["writer_epoch"],manifest["revocation_epoch"],manifest["authorization_digest"]):
                 raise RepoError("MEMORY_REQUEST_STALE")
             self.repo.check([manifest["knowledge_snapshot_digest"],manifest["retrieval_trace_digest"],manifest["protocol_envelope_ref"],*manifest["summary_node_ids"]], c)
+            if 'projection_epoch_generation' in manifest:
+                pointer=self.store.get('active_projection_epoch',run['id'],c)
+                expected=({'id':manifest['projection_epoch_id'],'generation':manifest['projection_epoch_generation']}
+                    if manifest.get('projection_epoch_id') else None)
+                if pointer!=expected:raise RepoError('EPOCH_STALE')
 
     def response_current(self, manifest):
         try: self.admission(manifest); return True
@@ -239,6 +244,9 @@ class MemoryService:
         if not m.get('context_compaction'):
             system+='\nHost runtime status (not task acceptance): '+json.dumps(runtime_status,ensure_ascii=False)
         system+=approved_guidance
+        if (m.get('context_compaction') or {}).get('mode')=='live-experimental-v2':
+            return self._epoch_context(run,records,state_key,state,hits,trace_id,tools,system,
+                runtime_status,approved_guidance,policy or {},fence)
         raw = coalesce_process_observations(self.store.messages(run_id))
         if raw and raw[0].get('role') == 'user' and raw[0].get('content') == run["data"]["goal"]:
             raw[0] = {**raw[0],'content':'Original task goal is provided in the system instructions.'}
@@ -608,6 +616,56 @@ class MemoryService:
             self.store.put('projection',run_id,projection)
             live.assert_current(run_id,live_trace)
         mark("commit_projection")
+        return system,messages,manifest
+
+    def _epoch_context(self,run,records,state_key,state,hits,trace_id,tools,system,runtime_status,guidance,policy,fence):
+        """Memory working state and raw-source Epoch share one exact coverage.
+
+        This path does not reuse old live floors or summarize a summary. It
+        preserves required loops, user corrections and failure properties in the
+        working state; optional retrieval is removed before history governance.
+        """
+        from ..projection_epoch import EpochProjection
+        rid=run['id'];m=run['data']['manifest']
+        maximum=min(self.profile.max_tokens,policy.get('max_tokens',self.profile.max_tokens))
+        reserve=max(self.profile.reserve_tokens,policy.get('reserve_tokens',0),getattr(self.provider,'max_tokens',None) or 0)
+        coord=ContextBudgetCoordinator(self.provider,maximum,reserve,self.profile.safety_tokens,m['model_config_digest'])
+        coord.serialized=self.serialized
+        # Dynamic retrieval is optional; the raw working-state version remains
+        # independently addressable and is never inferred from epoch cards.
+        context={'type':'memory_context_data','trust':'UNTRUSTED_DATA_NOT_AUTHORITY','working_state':state,
+            'working_state_digest':state_key,'host_runtime_status':runtime_status,'retrieved_evidence':[]}
+        prefix=[{'role':'user','content':canonical(context).decode()}]
+        available=maximum-reserve-self.profile.safety_tokens-coord.estimate(system,prefix,tools)
+        epoch=EpochProjection(self.store,self.runtime)
+        view,trace=epoch.project(rid,groups(self.store.messages(rid)),system=system,tools=tools,serialize=self.serialized,
+            available_history=available,scale=coord.scale,prefix_messages=prefix,
+            fits_limit=lambda msg:coord.estimate(system,msg,tools)+reserve+self.profile.safety_tokens<=maximum)
+        messages=[*prefix,*[msg for group in view for msg in group]];groups(messages)
+        breakdown=coord.assert_fits(system,messages,tools,guidance);request=self.serialized(system,messages,tools)
+        epoch.assert_current(rid,trace)
+        envelope=ProviderEnvelope(profile_digest=digest(run['data'].get('model_config',{})),messages=messages,rebase_verified=False)
+        envelope_ref=self.store.json_blob(envelope);request_ref=self.store.json_blob(request)
+        with self.store.tx() as c:
+            for record in records:
+                self.repo.derive(record['ref']['content_digest'],[record['ref']['source_id'],*record['artifact_dependencies']],c)
+            self.repo.derive(envelope_ref,[trace_id,*[r['ref']['content_digest'] for r in records]],c)
+            self.repo.derive(request_ref,[envelope_ref],c)
+        manifest=RequestContextManifest(run_id=rid,turn_request_id=uid('request-'),release_digest=m['release_digest'],
+            model_config_digest=m['model_config_digest'],provider_protocol_profile_digest=envelope.profile_digest,
+            knowledge_snapshot_digest=m['knowledge_snapshot_digest'],knowledge_index_digest=m['knowledge_index_digest'],
+            working_state_digest=state_key,summary_node_ids=[],summary_cutoff=0,retrieval_trace_digest=trace_id,
+            selected_memory_ids_versions=[],tool_schema_digest=digest(tools),control_epoch=run['control_epoch'],writer_epoch=run['writer_epoch'],
+            revocation_epoch=fence[2],authorization_digest=fence[3],visibility_domain=run['data']['visibility'],
+            estimated_input_tokens=breakdown.estimated_input_total,reserved_output_tokens=reserve,
+            serialized_request_digest=digest(request),protocol_envelope_ref=envelope_ref,mode=self.profile.mode,
+            projection_epoch_id=trace['projection_epoch_id'],projection_epoch_generation=trace['epoch_generation'],
+            budget_breakdown=asdict(breakdown)).model_dump()
+        self.admission(manifest)
+        self.repo.put('context_requests',manifest['turn_request_id'],{'manifest':manifest,'envelope_ref':envelope_ref,
+            'request_ref':request_ref,'usage':{},'usage_status':'PENDING'})
+        self.store.put('projection',rid,{'schema_version':2,'manifest':manifest,'estimated_tokens':breakdown.estimated_input_total,
+            'estimate_only':True,'live_compact':trace})
         return system,messages,manifest
 
     def reserve_main(self, manifest):

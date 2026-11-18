@@ -20,6 +20,9 @@ class Broker:
         self.progress=ProcessProgress(store,runtime)
     def available_tools(self,run):
         names=set(SCHEMAS)
+        if not run['data'].get('benchmark_allocation') or not getattr(self,'benchmark_self_test',None):names.discard('benchmark.self_test')
+        if run['data'].get('benchmark_allocation'):names-={'delegate','process.start','mcp.call','skill.bind'}
+        if run['data'].get('benchmark_allocation') and not self.sandbox.isolated:names.discard('process.run')
         if not self.store.get('session_run',run['id']) and not self.store.get('operator_config','capability_router',default={}).get('enabled'):
             names.discard('skill.bind')
         if not self.mcp:names-={'mcp.call','mcp.discover'}
@@ -29,6 +32,8 @@ class Broker:
             names-={'process.start','process.status','process.stop'}
         return names
     def register_call(self,run_id,turn_id,call):
+        if self.runtime.run(run_id)['data'].get('benchmark_allocation') and call.name=='process.run' and not self.sandbox.isolated:raise RepoError('BENCHMARK_ISOLATED_PROCESS_REQUIRED')
+        if self.runtime.run(run_id)['data'].get('benchmark_allocation') and call.name in {'delegate','process.start','mcp.call','skill.bind'}:raise RepoError('BENCHMARK_TOOL_DISABLED')
         if call.argument_error or call.raw_arguments is not None:raise RepoError('INVALID_TOOL_JSON',call.argument_error or 'Unvalidated raw tool arguments')
         if call.name not in SCHEMAS:raise RepoError("UNKNOWN_TOOL",call.name)
         args=SCHEMAS[call.name][0].model_validate(call.arguments).model_dump()
@@ -66,6 +71,8 @@ class Broker:
             if run_id and row["run_id"]!=run_id:raise RepoError("OPERATION_SCOPE_DENIED")
             return self.receipt(row)
     def allow(self,run,tool):
+        if tool=='benchmark.self_test':return bool(run['data'].get('benchmark_allocation') and getattr(self,'benchmark_self_test',None))
+        if run['data'].get('benchmark_allocation') and tool in {'delegate','process.start','mcp.call','skill.bind'}:return False
         if tool in READ_TOOLS:return True
         config=run["data"].get("authorization",{})
         if tool in {"create","edit","patch"}:return bool(config.get("workspace_write"))
@@ -118,7 +125,15 @@ class Broker:
                 c.execute("UPDATE operations SET state='WAITING_APPROVAL' WHERE id=?",(row["id"],));self.runtime.update(c,run,state="WAITING_APPROVAL")
                 return {"operation_id":row["id"],"operation_key":req.key,"status":"WAITING_APPROVAL","result":None}
             # Reserve exactly once while owning the operation state transition.
-            used=run["data"]["budget_used"];limit=run["data"]["manifest"]["budget"]
+            used=run["data"]["budget_used"];limit=self.runtime.budget_limits(run,c)
+            from .benchmark import check_budget
+            allocation=None
+            try:allocation=check_budget(self.runtime,run,'tool_calls',1,c)
+            except RepoError as exc:
+                if exc.code!='BUDGET_EXHAUSTED':raise
+                exc.budget_stop['allocation_scope']=exc.budget_stop['stage']
+                exc.budget_stop['stage']='tool'
+                budget_stop=exc
             total=c.execute("SELECT total_calls FROM tasks WHERE id=?",(run["task_id"],)).fetchone()[0]
             if self.runtime.active_seconds(run)>=limit["wall_seconds"]:
                 budget_stop = self.runtime.budget_error(run,"wall_seconds","tool")
@@ -126,7 +141,7 @@ class Broker:
                 budget_stop = self.runtime.budget_error(run,"tool_calls","tool")
             if budget_stop:
                 budget_error = budget_stop.code
-            elif total>=1000:budget_error='TASK_TOTAL_BUDGET'
+            elif total>=(allocation['session_model_calls']+allocation['session_tool_calls'] if allocation else 1000):budget_error='TASK_TOTAL_BUDGET'
             if no_progress and not budget_error:
                 c.execute("UPDATE operations SET state='CANCELLED',approved_epoch=NULL,result=? WHERE id=?",(canonical(no_progress).decode(),row['id']))
                 self.store.emit(c,req.run_id,'operation.no_progress_rejected',{'operation_id':row['id'],**no_progress},run['data']['visibility'])
@@ -199,6 +214,8 @@ class Broker:
         mutator=Mutator(self.runtime.workspace(run),run["id"],self.runtime.contract(run),self.faults,
             effect_guard=lambda _: self.runtime.file_effect_guard(run["id"], op_id))
         if getattr(self,'write_validator',None):self.write_validator(run,mutator.ws,mutator.plan(ops))
+        from .benchmark import write_scope
+        write_scope(self.runtime,run,mutator.plan(ops))
         result=mutator.apply(op_id,ops)
         with self.store.tx() as c:
             fresh=self.runtime.run(run["id"],c);self.runtime.update(c,fresh,writer=True)
@@ -216,6 +233,8 @@ class Broker:
             mutator=Mutator(ws,run["id"],self.runtime.contract(run),self.faults,
                 effect_guard=lambda _: self.runtime.file_effect_guard(run["id"], authority_operation_id or op_id))
             if getattr(self,'write_validator',None):self.write_validator(run,ws,mutator.plan(ops))
+            from .benchmark import write_scope
+            write_scope(self.runtime,run,mutator.plan(ops))
             mutator.apply(op_id,ops)
             with self.store.tx() as c:self.runtime.update(c,self.runtime.run(run["id"],c),writer=True)
     def _probe_check_command(self, req):
@@ -267,6 +286,12 @@ class Broker:
 
     async def _execute(self,req,op_id):
         run=self.runtime.run(req.run_id);ws=self.runtime.workspace(run);a=req.arguments;n=req.tool_name
+        if n=='benchmark.self_test':
+            from .benchmark import active_stage,allocation
+            if not allocation(self.runtime,run) or not getattr(self,'benchmark_self_test',None):raise RepoError('BENCHMARK_SELF_TEST_UNAVAILABLE')
+            stage=active_stage(self.runtime,run)
+            if a['stage_id']!=stage['body']['stage_id']:raise RepoError('BENCHMARK_STAGE_SCOPE_DENIED')
+            return await self.benchmark_self_test(req.run_id,a['stage_id'],op_id)
         if n=='workspace.diff':
             return ws.diff_view(run['data']['manifest']['workspace_baseline_digest'],a['path'],a['offset'],a['length'])
         if n=="read":
@@ -287,6 +312,13 @@ class Broker:
             return {"matches":matches,"truncated":False}
         if n=="artifact.read":
             if not self.store.get("run_artifact",digest([run["id"],a["artifact"]])):raise RepoError("ARTIFACT_SCOPE_DENIED")
+            if run['data'].get('benchmark_allocation'):
+                from .memory.repository import MemoryRepository
+                MemoryRepository(self.store).check([a['artifact']])
+            if ((run['data']['manifest'].get('context_compaction') or {}).get('mode') in {'live-experimental-v2','live-additive'}
+                    or self.store.get('active_request_projection',run['id'])):
+                from .live_compact_state import LiveProjection
+                LiveProjection(self.store,self.runtime)._reference(run['id'],a['artifact'])
             if run['data']['manifest'].get('memory_schema_version')==2:
                 memory=getattr(self,'memory',None)
                 if memory is None:raise RepoError('MEMORY_PROFILE_REQUIRED')
@@ -345,6 +377,9 @@ class Broker:
             self.store.put("plan",run["id"],{"steps":a["steps"],"turn_id":run['data'].get('active_turn',{}).get('turn_id')})
             return {"updated":True}
         if n in {"process.run","process.start"}:
+            if run['data'].get('benchmark_allocation'):
+                remaining=self.runtime.check_wall(run['id'],'tool')
+                a={**a,'timeout':min(a['timeout'],remaining)}
             from .commands import git_inspections, inline_observation
             if getattr(self.sandbox,'mode',None)=='swebench' and git_inspections(a['argv']):
                 return {'is_error':True,'code':'GIT_METADATA_UNAVAILABLE','executed':False,

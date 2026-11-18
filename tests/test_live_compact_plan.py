@@ -53,7 +53,9 @@ def test_user_boundary_checkpoint_floor_and_latest_three():
     assert plan(raw,head={'id':'checkpoint','group_end':5}).proposal is None
     raw.insert(11,{'id':'new-user','operation_id':None,'references_verified':True,
                    'data':{'role':'user','content':'New requirement: keep Unicode.'}})
-    assert plan(raw).proposal is None
+    proposal=plan(raw).proposal
+    assert proposal and proposal.group_end==5
+    assert 'new-user' not in proposal.source_message_ids
     assert plan(records(3)).reason=='RECENT_GROUPS'
     assert plan(records(),available_history=0).reason=='NO_HISTORY_BUDGET'
     assert plan(records(),available_history=100000).reason=='BELOW_TRIGGER'

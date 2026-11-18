@@ -57,6 +57,8 @@ class ProcessRun(Process):
             raise ValueError('A linked probe assertion cannot be declared as a workspace write')
         return self
 class Lease(Args):lease_id:str
+class BenchmarkTest(Args):
+    stage_id:str=Field(min_length=1,max_length=120)
 class Artifact(Args):
     artifact:str
     offset:int=Field(0,ge=0)
@@ -102,4 +104,5 @@ SCHEMAS['workspace.diff']=(WorkspaceDiff,'Inspect current changes against this t
 READ_TOOLS.add('workspace.diff')
 SCHEMAS['skill.bind']=(SkillBind,'Bind an offered portable capability to current task evidence. Does not execute actions, grant permissions, activate, or publish. May be followed by actual tools in the same response.')
 READ_TOOLS.add('skill.bind')
+SCHEMAS['benchmark.self_test']=(BenchmarkTest,'Run the current admitted benchmark stage tests in the trusted external grader. Diagnostic only; never stage acceptance. No network, future task, test source or reference solution is exposed.')
 def definitions(names=None):return [{"name":n,"description":d,"parameters":s.model_json_schema()} for n,(s,d) in SCHEMAS.items() if names is None or n in names]

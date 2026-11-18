@@ -148,7 +148,7 @@ def runtime_feedback(store, runtime, run, provider=None, *, ledger=None):
     if ledger is None:
         ledger = work_status(store,runtime,run)
     snapshot = ledger['source_digest']
-    used = run['data']['budget_used']; limits = run['data']['manifest']['budget']
+    used = run['data']['budget_used']; limits = runtime.budget_limits(run)
     budget = {k: {'used': used.get(k, 0), 'limit': limits.get(k),
                   'remaining': max(0, limits[k] - used.get(k, 0)) if limits.get(k) is not None else None}
               for k in ('tool_calls', 'model_calls')}

@@ -87,14 +87,21 @@ class SemanticCompactor:
         run = self.runtime.run(run_id)
         head_key = 'summary:'+run_id+(':after:'+str(after_seq) if after_seq else '')
         live_head = self.repo.store.get('live_compact_head',run_id)
-        if live_head:
+        epoch_mode=(run['data']['manifest'].get('context_compaction') or {}).get('mode')=='live-experimental-v2'
+        epoch_head=self.repo.store.get('active_projection_epoch',run_id)
+        if epoch_mode:
+            # Sources always come from History, including ranges covered by
+            # older epochs. No inference from a projection/semantic card.
+            if after_seq and not any(r['seq']==after_seq for r in self.history.records(run_id)):
+                raise RepoError('SUMMARY_SEGMENT_BOUNDARY')
+        elif live_head:
             cut = self.repo.store.get('live_compact_cut',live_head['id'])
             if not cut or after_seq != int(cut['source_message_ids'][-1]):
                 raise RepoError('SUMMARY_LIVE_BOUNDARY','Compact only raw sources after the latest live checkpoint')
         elif after_seq:
             raise RepoError('SUMMARY_LIVE_BOUNDARY')
         return {"run_id": run_id, "control": run["control_epoch"], "writer": run["writer_epoch"],
-                'after_seq': after_seq, 'head_key': head_key, 'live_head': live_head,
+                'after_seq': after_seq, 'head_key': head_key, 'live_head': live_head,'epoch_head':epoch_head,
                 'authorization': digest(run['data'].get('authorization',{})),
                 "revocation": self.repo.epoch(), "head": self.repo.get("memory_control", head_key),
                 "prefix": digest(records), "cutoff": records[-1]["seq"] if records else 0}
@@ -219,9 +226,16 @@ class SemanticCompactor:
             if (run["control_epoch"], run["writer_epoch"], self.repo.epoch(c)) != (fence["control"], fence["writer"], fence["revocation"]):
                 raise RepoError("SUMMARY_STALE_FENCE")
             if (digest(run['data'].get('authorization',{})) != fence['authorization']
-                    or self.repo.store.get('live_compact_head',run_id,c) != fence['live_head']):
+                    or self.repo.store.get('live_compact_head',run_id,c) != fence['live_head']
+                    or self.repo.store.get('active_projection_epoch',run_id,c) != fence['epoch_head']):
                 raise RepoError('SUMMARY_STALE_FENCE')
             if self.repo.get("memory_control", fence['head_key'], c) != fence["head"]: raise RepoError("SUMMARY_HEAD_CAS")
+            if (run['data']['manifest'].get('context_compaction') or {}).get('mode')=='live-experimental-v2':
+                prefix=self.repo.get('memory_control','summary:'+run_id,c)
+                segments=self.repo.get('memory_control','summary_segments:'+run_id,c,{'heads':[]})['heads']
+                if (fence['after_seq'] and prefix and prefix['cutoff']>fence['after_seq']
+                    or not fence['after_seq'] and any(h['after_seq']<fence['cutoff'] for h in segments)):
+                    raise RepoError('SUMMARY_SEGMENT_OVERLAP')
             self.repo.check(raw_refs, c)
             # Verify immutable prefix in this transaction; a new tail is allowed.
             rows = c.execute("SELECT id,data FROM messages WHERE run_id=? AND id>? AND id<=? ORDER BY id",

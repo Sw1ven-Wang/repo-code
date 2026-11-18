@@ -15,6 +15,26 @@ from repo_code.service import RepoCode
 pytestmark=[pytest.mark.isolation,pytest.mark.docker_backend]
 
 
+@pytest.mark.asyncio
+async def test_benchmark_process_import_preserves_stage_protected_paths(docker_app,tmp_path):
+    from repo_code.benchmark import TrustedStageLoader,admit_budget
+    from repo_code.models import ToolCall
+    from repo_code.util import digest
+    seed=tmp_path/'bench-seed';seed.mkdir()
+    run=docker_app.new_task('Web source',seed,conversation=True,authorize_write=True,authorize_process=True)
+    admit_budget(docker_app.runtime,run['id'],experiment_digest=digest('docker-stage-control'),
+        session_model_calls=200,session_tool_calls=1000,stage_model_calls=10,stage_tool_calls=20,wall_seconds=600,stage_seconds=120)
+    ws=docker_app.runtime.workspace(docker_app.runtime.run(run['id']))
+    TrustedStageLoader(docker_app.runtime).admit(run['id'],'web',{'src/index.html':b'protected','src/App.tsx':b'initial'},
+        ['src/*'],protected_paths=['src/index.html'],prompt_digest=digest('Web source'),expected_before=ws.snapshot(),initial=True)
+    call=ToolCall(id='forbidden-process-write',name='process.run',arguments={
+        'argv':['python','-c',"open('src/index.html','w').write('forbidden')"],'expect_workspace_change':True})
+    request=docker_app.broker.register_call(run['id'],'stage',call)
+    receipt=await docker_app.broker.submit(request)
+    assert receipt['status']=='FAILED' and receipt['result']['code']=='BENCHMARK_STAGE_SCOPE_DENIED'
+    assert ws.path('src/index.html').read_bytes()==b'protected'
+
+
 @pytest.fixture
 def docker_app(tmp_path):
     image=os.getenv('REPO_CODE_DOCKER_IMAGE')

@@ -17,6 +17,7 @@ from .util import RepoError, canonical, digest, redact_data
 class LiveCompactProfile(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
     version: int = Field(default=1, ge=1, le=1)
+    preserve_reasoning: bool = False
     trigger_ratio: float = Field(default=0.60, gt=0, lt=1)
     forecast_ratio: float = Field(default=0.75, gt=0, lt=1)
     recent_groups: int = Field(default=3, ge=1, le=20)
@@ -60,12 +61,15 @@ def source_archive(records):
             'messages': [r['data'] for r in records]}
 
 
-def protocol_supported(messages):
+def protocol_supported(messages, preserve_reasoning=False):
     """Only the validated plain chat/function-call subset may be rebased."""
     for message in messages:
         allowed = {'role', 'content', 'tool_calls', 'tool_call_id', 'is_error',
                    'native_blocks', 'reasoning_content'}
-        if set(message) - allowed or message.get('native_blocks') or message.get('reasoning_content') is not None:
+        reasoning = message.get('reasoning_content')
+        if (set(message) - allowed or message.get('native_blocks')
+                or (reasoning is not None and (not preserve_reasoning or not isinstance(reasoning,str)
+                    or message.get('role') != 'assistant'))):
             return False
         if not isinstance(message.get('content', ''), str):
             return False
@@ -159,11 +163,24 @@ def render_card(group, records, archive_ref, profile):
     from .memory.working_state import clean_memory_data
     body = clean_memory_data(body)
     card = {'role': 'user', 'content': canonical(body).decode()}
-    return card if estimate_tokens(card) <= profile.card_tokens else None
+    if estimate_tokens(card) > profile.card_tokens:
+        return None
+    if profile.preserve_reasoning:
+        # The assistant protocol skeleton is mandatory, including empty native
+        # reasoning and every call identity. Only successful tool bodies change.
+        return {'kind': 'live_compact_tool_projection', 'messages': [
+            dict(message) if message['role']=='assistant' else {**message,'content':card['content']}
+            for message in group]}
+    return card
+
+
+def card_messages(card):
+    return card['messages'] if card.get('kind')=='live_compact_tool_projection' else [card]
 
 
 def plan_cut(records, projected_groups, *, system, tools, serialize, profile,
-             available_history, head=None, scale=1.0, prefix_messages=(), after_group=-1, oldest_first=False):
+             available_history, head=None, scale=1.0, prefix_messages=(), after_group=-1, oldest_first=False,
+             completed_before_group=None, scan_start=None, trigger_on_history=False):
     """Return NO_CUT or one complete, recent span; no Store/model/I/O access.
 
     Token comparisons use the same native serializer and scale as admission.
@@ -174,7 +191,7 @@ def plan_cut(records, projected_groups, *, system, tools, serialize, profile,
     except (ValueError, KeyError, TypeError, AttributeError, RepoError):
         # Malformed protocol is data, never a partially usable tool group.
         return PlanResult('INVALID_PROTOCOL')
-    if not protocol_supported([r['data'] for r in records]):
+    if not protocol_supported([r['data'] for r in records], profile.preserve_reasoning):
         return PlanResult('PROTOCOL_REBASE_UNVERIFIED')
     if len(projected_groups) != len(indexed):
         return PlanResult('PROJECTION_ALIGNMENT')
@@ -188,16 +205,28 @@ def plan_cut(records, projected_groups, *, system, tools, serialize, profile,
     if len(tool_indexes) <= profile.recent_groups:
         return PlanResult('RECENT_GROUPS')
     latest_cost = estimate_tokens(indexed[tool_indexes[-1]][1])
-    if (history_cost <= profile.trigger_ratio * available_history
-            or history_cost + latest_cost <= profile.forecast_ratio * available_history):
+    below_history = history_cost <= profile.trigger_ratio * available_history
+    below_forecast = history_cost + latest_cost <= profile.forecast_ratio * available_history
+    if ((below_history and below_forecast) if trigger_on_history else (below_history or below_forecast)):
         return PlanResult('BELOW_TRIGGER')
-    boundary = max((i for i, g, _ in indexed if any(m['role'] == 'user' for m in g)), default=-1)
-    floor = max(boundary, after_group, (head or {}).get('group_end', -1))
+    # A user message is a span barrier, not a global history floor. Completed
+    # turns remain eligible independently; the scan below clears pending at
+    # every non-tool group, so a card never contains or bridges user messages.
+    floor = max(after_group, (head or {}).get('group_end', -1))
     keep = set(tool_indexes[-profile.recent_groups:])
     max_span = min(profile.max_span_tokens, max(profile.min_span_tokens, int(0.60 * available_history)))
     pending = []
-    candidates=indexed[-profile.max_scan_groups:]
+    # Native assistant skeletons cannot later be semantically folded. Start at
+    # the oldest eligible group so a checkpoint does not pin a large raw prefix.
+    oldest_first=oldest_first or profile.preserve_reasoning
+    # The additive Host supplies a bounded forward window over immutable raw
+    # group positions. The original experimental planner retains its tail scan.
+    candidates=(indexed[-profile.max_scan_groups:] if scan_start is None
+                else indexed[scan_start:scan_start+profile.max_scan_groups])
     for i, group, source in (candidates if oldest_first else reversed(candidates)):
+        if completed_before_group is not None and i>=completed_before_group:
+            pending=[]
+            continue
         if i <= floor:
             if oldest_first:continue
             break
@@ -224,10 +253,13 @@ def plan_cut(records, projected_groups, *, system, tools, serialize, profile,
         if card is None:
             pending = []
             continue
-        view = list(projected_groups); view[start] = [card]
+        view = list(projected_groups); view[start] = card_messages(card)
         for position in range(start+1, end+1):view[position] = []
         savings = before - measure(flattened(view))
         if savings <= 0:
+            # Already-coalesced observations can be smaller than a card. Do
+            # not let them mask the next independently compressible group.
+            if profile.preserve_reasoning:pending=[]
             continue
         return PlanResult('CUT', CutProposal(start, end, tuple(r['id'] for r in source),
             digest(combined), archive_ref, card, digest(card), (head or {}).get('id'), digest(profile), savings))

@@ -11,6 +11,9 @@ from .providers import model_configuration
 class RepoCode:
     """Public composition root shared by CLI, tests and embedding applications."""
     def __init__(self,state_root,provider,sandbox="auto",image=None,on_delta=None,memory_profile=None,memory_encoder=None,*,context_compaction='legacy',live_compact_profile=None):
+        if memory_profile is not None and context_compaction=='live-additive':
+            from .util import RepoError
+            raise RepoError('ADDITIVE_MEMORY_V1_REQUIRED','live-additive composes the default Memory v1 ContextEngine; Memory v2 profiles retain their existing modes')
         if hasattr(provider,'assert_state_safe'):provider.assert_state_safe(state_root)
         self.provider=provider
         self.store=Store(Path(state_root));self.sandbox=Sandbox(self.store,sandbox,image)

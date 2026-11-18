@@ -95,8 +95,11 @@ def test_legacy_context_repackages_after_provider_feedback(tmp_path):
     provider=SimpleNamespace(observed_input_scale=1.0)
     serializer=lambda s,m,t:{'system':s,'messages':m,'tools':t}
     engine=ContextEngine(app.store,app.runtime,serializer,1024,1.0,provider=provider)
-    _,before=engine.build(run['id'],[],{'max_tokens':6000,'reserve_tokens':1024})
+    # With proactive low-water packing a 6k window already reaches the minimum
+    # summary+last-group layout before feedback. Leave room for a measurable
+    # second repack; retain the original calibration and hard-budget assertions.
+    _,before=engine.build(run['id'],[],{'max_tokens':12000,'reserve_tokens':1024})
     provider.observed_input_scale=1.8
-    system,after=engine.build(run['id'],[],{'max_tokens':6000,'reserve_tokens':1024})
-    assert estimate_tokens(serializer(system,after,[]))*1.8+1024<=6000
+    system,after=engine.build(run['id'],[],{'max_tokens':12000,'reserve_tokens':1024})
+    assert estimate_tokens(serializer(system,after,[]))*1.8+1024<=12000
     assert len(after)<len(before)

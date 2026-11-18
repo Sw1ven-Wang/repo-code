@@ -89,7 +89,7 @@ class OpenAIProvider:
         self.last_usage={}
         self.last_response_info={}
         request,decode=self.build_request(system,messages,tools,json_mode=json_mode)
-        text=[];reasoning=[];calls={};usage={};reason=None;stream=None
+        text=[];reasoning=[];reasoning_seen=False;calls={};usage={};reason=None;stream=None
         try:
             stream=await self.client.chat.completions.create(**request)
             async for chunk in stream:
@@ -99,7 +99,10 @@ class OpenAIProvider:
                     self.last_usage=usage
                 if not chunk.choices:continue
                 ch=chunk.choices[0];d=ch.delta
-                if getattr(d,'reasoning_content',None):reasoning.append(d.reasoning_content)
+                native_reasoning=getattr(d,'reasoning_content',None)
+                if native_reasoning is not None:
+                    if not isinstance(native_reasoning,str):raise RepoError('UNSUPPORTED_REASONING_PROTOCOL')
+                    reasoning_seen=True;reasoning.append(native_reasoning)
                 if ch.finish_reason:reason=ch.finish_reason
                 if d.content:
                     text.append(d.content)
@@ -127,7 +130,7 @@ class OpenAIProvider:
                 except ValueError as exc:args={};error=str(exc)[:220]
                 parsed.append(ToolCall(id=item["id"],name=decode.get(item["name"],item["name"]),arguments=args,
                                        argument_error=error,raw_arguments=item['arguments'] if error else None))
-            return Assistant(text="".join(text),reasoning_content=''.join(reasoning) if reasoning or self.thinking=='enabled' else None,tool_calls=parsed,usage=usage,stop_reason=reason)
+            return Assistant(text="".join(text),reasoning_content=''.join(reasoning) if reasoning_seen or self.thinking=='enabled' else None,tool_calls=parsed,usage=usage,stop_reason=reason)
         except RepoError as exc:
             exc.usage=usage;exc.provider_details=self.last_response_info;raise
         except Exception as exc:

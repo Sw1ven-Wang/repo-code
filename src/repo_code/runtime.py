@@ -79,6 +79,7 @@ class Runtime:
             self.store.append_message(run_id,{"role":"user","content":goal},c=c)
         self.store.ref(baseline,run_id);return self.run(run_id)
     def _conversation_ready(self,run,c):
+        if self.store.get('benchmark_stage_pending',run['id'],c):raise RepoError('BENCHMARK_STAGE_RECOVERY_REQUIRED')
         if not run['data']['manifest'].get('conversation_mode'):raise RepoError('CONVERSATION_REQUIRED')
         if run['cancel_requested']:raise RepoError('CANCEL_PENDING')
         if c.execute("SELECT 1 FROM control WHERE run_id=? AND status LIKE 'PENDING%'",(run['id'],)).fetchone():raise RepoError('CONTROL_PENDING')
@@ -89,6 +90,8 @@ class Runtime:
             run=self.run(run_id,c);self.assert_executable(run);self._conversation_ready(run,c)
             self.update(c,run,state='WAITING_USER')
             self.store.emit(c,run_id,'conversation.waiting_user',{},run['data']['visibility'])
+            from .projection_epoch import seal_turn
+            seal_turn(self,run,c)
         return self.run(run_id)
     def submit_turn(self,run_id,turn_id,text):
         if not isinstance(turn_id,str) or not turn_id or not isinstance(text,str) or not text.strip():raise RepoError('INVALID_CONVERSATION_TURN')
@@ -101,7 +104,7 @@ class Runtime:
                 return run
             if run['state']!='WAITING_USER':raise RepoError('CONVERSATION_NOT_WAITING')
             self._conversation_ready(run,c)
-            if self.active_seconds(run)>=run['data']['manifest']['budget']['wall_seconds']:raise RepoError('BUDGET_EXHAUSTED','wall_seconds')
+            if self.active_seconds(run)>=self.budget_limits(run,c)['wall_seconds']:raise RepoError('BUDGET_EXHAUSTED','wall_seconds')
             self.store.append_message(run_id,{'role':'user','content':text},c=c)
             self.store.put('conversation_turn',key,{'run_id':run_id,'turn_id':turn_id,'content_digest':content},c)
             run['data']['active_turn']={'turn_id':turn_id,'text':text}
@@ -118,6 +121,7 @@ class Runtime:
             self.store.emit(c,run_id,'conversation.finished',{},run['data']['visibility'])
         return self.run(run_id)
     def assert_executable(self,run):
+        if self.store.get('benchmark_stage_pending',run['id']):raise RepoError('BENCHMARK_STAGE_RECOVERY_REQUIRED')
         if run["state"]!="RUNNING" or run["cancel_requested"]:raise RepoError("RUN_NOT_EXECUTABLE",run["state"])
         with contextlib.closing(self.store.connect()) as c:
             if c.execute("SELECT 1 FROM control WHERE run_id=? AND status LIKE 'PENDING%'",(run["id"],)).fetchone():raise RepoError("CONTROL_PENDING")
@@ -126,10 +130,17 @@ class Runtime:
         data=run["data"];started=data.get("clock_active_since")
         return data.get("active_seconds",0)+(max(0,now()-started) if started is not None else 0)
     def remaining_seconds(self,run_id):
-        r=self.run(run_id);return max(0,r["data"]["manifest"]["budget"]["wall_seconds"]-self.active_seconds(r))
+        from .benchmark import remaining_seconds
+        r=self.run(run_id);stage=remaining_seconds(self,r)
+        return stage if stage is not None else max(0,self.budget_limits(r)['wall_seconds']-self.active_seconds(r))
+    def budget_limits(self,run,c=None):
+        from .benchmark import allocation
+        limits=dict(run['data']['manifest']['budget']);body=allocation(self,run,c)
+        if body:limits.update(model_calls=body['session_model_calls'],tool_calls=body['session_tool_calls'],wall_seconds=body['wall_seconds'],child_calls=0)
+        return limits
     def budget_error(self, run, dimension, stage, dispatch_status="NOT_DISPATCHED"):
         active = self.active_seconds(run)
-        limit = run["data"]["manifest"]["budget"]["wall_seconds"]
+        limit = self.budget_limits(run)['wall_seconds']
         error = RepoError("BUDGET_EXHAUSTED", dimension)
         error.budget_stop = {"dimension": dimension, "stage": stage, "dispatch_status": dispatch_status,
                              "active_seconds": active, "remaining_seconds": max(0, limit-active)}
@@ -137,7 +148,7 @@ class Runtime:
 
     def check_wall(self, run_id, stage):
         run = self.run(run_id)
-        remaining = run["data"]["manifest"]["budget"]["wall_seconds"] - self.active_seconds(run)
+        remaining = self.remaining_seconds(run_id)
         if remaining <= 0:
             raise self.budget_error(run, "wall_seconds", stage)
         return remaining
@@ -145,12 +156,15 @@ class Runtime:
     def consume(self,run_id,kind,count=1,*,stage="dispatch"):
         if count<0:raise RepoError("INVALID_BUDGET")
         with self.store.tx() as c:
-            run=self.run(run_id,c);data=run["data"];limit=data["manifest"]["budget"]
+            run=self.run(run_id,c);data=run["data"];limit=self.budget_limits(run,c)
+            from .benchmark import check_budget
+            allocation=check_budget(self,run,kind,count,c)
             if self.active_seconds(run)>=limit["wall_seconds"]:raise self.budget_error(run,"wall_seconds",stage)
             used=data["budget_used"];value=used.get(kind,0)+count
             if kind not in limit or (limit[kind] is not None and value>limit[kind]):raise self.budget_error(run,kind,stage)
             task=c.execute("SELECT total_calls FROM tasks WHERE id=?",(run["task_id"],)).fetchone()
-            if limit.get('model_calls') is not None and task[0]+count>1000:raise RepoError("TASK_TOTAL_BUDGET")
+            task_cap=allocation['session_model_calls']+allocation['session_tool_calls'] if allocation else 1000
+            if limit.get('model_calls') is not None and task[0]+count>task_cap:raise RepoError("TASK_TOTAL_BUDGET")
             used[kind]=value;self.update(c,run,data=data)
             c.execute("UPDATE tasks SET total_calls=total_calls+? WHERE id=?",(count,run["task_id"]))
     def admit(self,run_id,event_id,kind,text=""):

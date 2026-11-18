@@ -54,7 +54,7 @@ def parser():
     p.add_argument('--max-output-tokens',type=int)
     p.add_argument('--temperature',type=float)
     p.add_argument('--memory-profile',type=Path,help='Explicit Memory v2 profile for new Runs; required unchanged on resume')
-    p.add_argument('--context-compaction',choices=['legacy','live-experimental'],default='legacy',help='Opt-in local history projection; fixed for each Run')
+    p.add_argument('--context-compaction',choices=['legacy','live-experimental','live-experimental-v2','live-additive'],default='legacy',help='Opt-in local history projection; fixed for each Run')
     p.add_argument('--live-compact-profile',type=Path,help='Optional JSON live projection profile; required unchanged on resume')
     p.add_argument('--mcp-config',type=Path,help='Operator-owned legacy stdio MCP profiles; native sandbox only')
     sub=p.add_subparsers(dest='command',required=True)

@@ -188,7 +188,7 @@ class CodingAgent:
         if not review and not (has_changes or failed_write):
             return False, None
         used = run['data']['budget_used']
-        budget = run['data']['manifest']['budget']
+        budget = self.runtime.budget_limits(run)
         room = all(budget[key] is None or budget[key] - used.get(key, 0) >= needed
                    for key, needed in [('model_calls', 2), ('tool_calls', 1)])
         pending = evidence['pending_probes']
@@ -279,6 +279,13 @@ class CodingAgent:
                 config=await self.worker.invoke(components["context_policy"],{"operation":"context_config","run_id":run_id},run_id)
                 # Policy may tighten, never exceed the Host maximum context allocation.
                 config["max_tokens"]=min(max(int(config.get("max_tokens",24000)),6000),self.context_ceiling)
+                # A frozen, signed Host benchmark grant may select a larger
+                # context window equally for both arms. It grants no tool or
+                # acceptance authority and cannot be changed after dispatch.
+                from .benchmark import allocation as benchmark_allocation
+                allocation=benchmark_allocation(self.runtime,run)
+                if allocation and allocation.get('context_tokens') is not None:
+                    config['max_tokens']=allocation['context_tokens']
                 config["reserve_tokens"]=min(max(int(config.get("reserve_tokens",4096)),1024),8192)
                 tools=definitions(self.broker.available_tools(run))
                 if run['data']['manifest'].get('memory_schema_version')!=2:
@@ -352,8 +359,10 @@ class CodingAgent:
                 if memory:
                     system,messages,request_manifest=await memory.prepare_context(run_id,tools,system_suffix,config,memory_cfg)
                 else:system,messages=self.context.build(run_id,tools,config,memory_cfg,system_suffix=system_suffix)
-                if run['data']['manifest'].get('context_compaction'):
-                    live_token=(self.store.get('projection',run_id) or {}).get('live_compact')
+                projection=self.store.get('projection',run_id) or {}
+                if not memory:live_token=projection.get('request_projection')
+                if live_token is None and run['data']['manifest'].get('context_compaction'):
+                    live_token=projection.get('live_compact')
                 from .context import estimate_tokens
                 if not memory:
                     from .memory.budget import ContextBudgetCoordinator

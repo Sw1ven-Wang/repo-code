@@ -159,6 +159,8 @@ class RequestContextManifest(Contract):
     summary_node_ids: list[str]
     summary_cutoff: int
     summary_segments: list[dict[str, Any]] = Field(default_factory=list)
+    projection_epoch_id: str | None = None
+    projection_epoch_generation: int = 0
     retrieval_trace_digest: str
     selected_memory_ids_versions: list[dict[str, Any]]
     tool_schema_digest: str
