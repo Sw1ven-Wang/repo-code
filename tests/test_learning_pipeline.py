@@ -89,3 +89,81 @@ async def test_scope_missing_validation_and_unknown_dispatch_do_not_call_models(
             await flow.advance(sid,forbidden,forbidden,lambda _:{'support_tasks':{t['id']:t},'probes':probes},draft_ids=[d['id']])
         assert not app.store.values('procedure_promotion_input')
     finally:app.close()
+
+
+@pytest.mark.asyncio
+async def test_host_stage_is_saved_before_batch_and_replayed_after_restart(tmp_path):
+    from repo_code.service import RepoCode
+    from repo_code.providers import ScriptedProvider
+    from repo_code.episodes import EpisodeBuilder
+    from repo_code.verified_stages import VerifiedStages
+    from test_review_v151 import human_contract
+    from test_curator_evidence_pipeline import provider
+
+    root = tmp_path / 'state'
+    app = RepoCode(root, ScriptedProvider(), 'local')
+    collected = []
+    try:
+        collection = app.session_experiences().create_collection('project:stages', 'live')
+        for number in range(2):
+            folder = tmp_path / str(number)
+            folder.mkdir()
+            run = app.new_task('Check the task result', folder, human_contract(),
+                               session_id=collection, task_family='stage-test')
+            intent = app.runtime.prepare(run['id'])
+            if number:
+                app.store.put('human_acceptance', digest([run['id'], 'review', intent.source_digest]),
+                              {'approved': True, 'contract': intent.contract_digest})
+            decision = await app.grader.evaluate(intent, app.runtime.contract(run))
+            assert not [row for row in app.store.values(VerifiedStages.KIND)
+                        if row['payload']['run_id'] == run['id']]
+            verdict = app.runtime.commit(intent, decision)
+            assert verdict['status'] == ('COMMITTED' if number else 'NOT_VERIFIED')
+            assert app.runtime.commit(intent, decision)['status'] == ('ALREADY_COMMITTED' if number else 'NOT_VERIFIED')
+            if not number:
+                app.runtime.end(run['id'], 'PARTIAL', 'Stopped after negative result')
+            stage, = [row['payload'] for row in app.store.values(VerifiedStages.KIND)
+                      if row['payload']['run_id'] == run['id']]
+            assert stage['source_digest'] == intent.source_digest
+            assert stage['outcome'] == ('DELIVERY_VERIFIED' if number else 'DELIVERY_NOT_VERIFIED')
+            if not number:
+                # Revocation applies before evidence can be expanded or dispatched.
+                app.store.put('revocation', decision.evidence_ids[0], {'reason': 'Withdraw checked source'})
+            collected.append(stage['id'])
+        assert app.session_experiences().accumulation(collection)['stage_candidates'] == collected
+        assert not app.store.values('l1_episode')
+    finally:
+        app.close()
+
+    app = RepoCode(root, ScriptedProvider(), 'local')
+    dispatched = []
+    try:
+        app.store.put('operator_config', 'curator_evidence_pipeline', {'procedure_draft_stage': True})
+        app.store.put('operator_config', 'procedure_draft_seed', {'lessons': ['pre-loaded experience']})
+        app.store.put('operator_config', 'learning_public_task_context', {'problem_statement': 'a different task'})
+        flow = app.learning_pipeline(Runner())
+        def curator(candidate_id):
+            assert candidate_id == collected[1]
+            def respond(payload, index):
+                dispatched.append(candidate_id)
+                assert payload['metadata']['verification_summary']['stage_outcome'] == 'DELIVERY_VERIFIED'
+                assert 'reports' not in payload and not payload['evidence']
+                assert 'seed_lessons' not in payload
+                assert payload['metadata']['public_task_context'] is None
+                return {'status': 'COMPLETE', 'claims': []}
+            return provider(respond)
+        first = await flow.curate_stages(collection, curator, max_stages=1)
+        assert first['results'][0]['status'] == 'BLOCKED'
+        assert not dispatched and not app.store.values('l1_episode')
+        second = await flow.curate_stages(collection, curator)
+        stage = second['results'][0]
+        assert stage['reports'][0]['status']=='INCOMPLETE'
+        assert stage['status'] == 'NEEDS_EVIDENCE' and not second['reuse_authorized']
+        episode = EpisodeBuilder(app.store).get(stage['episode_ids'][0])
+        assert episode['stage_candidate_id'] == collected[1]
+        assert episode['selection_version'] == 'episode-v2'
+        assert not app.store.values('session_grant')
+        assert (await flow.curate_stages(collection, curator))['results'] == []
+        assert dispatched == [collected[1]]
+    finally:
+        app.close()

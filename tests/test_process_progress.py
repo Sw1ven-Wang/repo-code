@@ -57,6 +57,15 @@ async def test_model_can_recover_with_edit_and_retest_after_warning(tmp_path,san
         report=await app.execute(run['id'])
         assert report['reason'].startswith('CANDIDATE_READY_EXTERNAL_EVALUATION')
         assert report['candidate_review']['status']=='NEW_CHECK_PASSED'
+        assert report['delivery'] is None
+        candidates=app.store.values('l1_stage_candidate')
+        if memory:
+            assert not candidates  # This Memory v2 fixture disables learning.
+        else:
+            stage,=(row['payload'] for row in candidates)
+            assert stage['outcome']=='NEW_CHECK_PASSED' and stage['run_state']=='RUNNING'
+            assert stage['source_digest']==app.runtime.workspace(run).snapshot()
+        assert not app.store.values('l1_episode')
         assert (app.runtime.workspace(run).root/'fix.py').read_text()=='fixed=True\n'
         assert app.runtime.run(run['id'])['data']['budget_used']['tool_calls']==8
         assert app.provider.calls==len(replies)

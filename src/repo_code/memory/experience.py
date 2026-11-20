@@ -173,7 +173,8 @@ class ExperienceConsolidation:
         return records,filters
 
     def search(self,query,*,purpose,scope=None,run_id=None,phase='DEBUG',environment=None,
-               file_versions=None,facts=None,symbols=(),limit=6,token_budget=None,semantic=False):
+               file_versions=None,facts=None,symbols=(),limit=6,token_budget=None,semantic=False,
+               match_only=False,pinned_revision=None):
         if purpose not in {'runtime','consolidation'}:raise RepoError('EXPERIENCE_PURPOSE')
         if purpose=='runtime' and not run_id:raise RepoError('EXPERIENCE_RUN_REQUIRED')
         started=time.monotonic();environment=environment or {};facts=facts or {};file_versions=file_versions or {}
@@ -204,6 +205,7 @@ class ExperienceConsolidation:
                 session_entries=SessionExperiences(self.owner.runtime).entries(run_id,c)
                 for entity,spec in session_entries.items():entries.setdefault(entity,spec)
                 for entity,spec in entries.items():
+                    if pinned_revision is not None and (entity,spec.get('revision'),spec.get('revision_digest'))!=pinned_revision:continue
                     revision=spec.get('revision')
                     if isinstance(revision,bool) or not isinstance(revision,int) or revision<1:
                         filters.append({'id':entity,'reason':'RELEASE_VERSION_MISMATCH'});continue
@@ -213,6 +215,7 @@ class ExperienceConsolidation:
                     if record['conditions']['scope']==scope:records.append(record)
             else:records,filters=self._eligible(scope,c)
             selected=[]
+            approved_triggers={}
             for record in records:
                 cond=record['conditions'];spec=entries.get(record['id'])
                 reason=None
@@ -236,13 +239,40 @@ class ExperienceConsolidation:
                                 'valid_until':claim.get('valid_until')},SimpleNamespace(environment=environment),file_versions)
                             if status!='TRUE':reason=why
                 if reason:filters.append({'id':record['id'],'reason':reason});continue
-                selected.append({'id':record['id'],'revision':record['revision'],'revision_digest':record['revision_digest'],
+                item={'id':record['id'],'revision':record['revision'],'revision_digest':record['revision_digest']}
+                if match_only and purpose=='runtime':
+                    # Candidate matching uses the approved description and trigger labels.
+                    # Procedure steps and source references do not participate in recall.
+                    text=' '.join((record['content']['text'],record['content'].get('subject',''),*cond['triggers']))
+                    approved_triggers[record['id']]=cond['triggers']
+                    selected.append({**item,'text':text})
+                    continue
+                selected.append({**item,
                     'text':record['content']['text']+' '+canonical(record['content'].get('procedure') or {}).decode(),
                     'category':record['content']['category'],'scope':scope,'status':'ACTIVE' if purpose=='runtime' else record['status'],
                     'conditions':cond,'sources':[s['lesson_id'] for s in record['support']],
                     'applicability':'TRUE' if purpose=='runtime' else 'REVIEW_ONLY','grants_edit_authority':False})
         retriever=getattr(self.owner,'retriever',None) or DynamicRetriever(self.repo,self.profile)
-        try:hits,trace=retriever.rank_experiences(selected,query,symbols=symbols,limit=limit,token_budget=token_budget,semantic=semantic)
+        if pinned_revision is not None and (purpose!='runtime' or not match_only):raise RepoError('EXPERIENCE_PURPOSE')
+        try:
+            if pinned_revision is not None:
+                # Direct lookup uses the same eligibility and post-read checks as search.
+                hits=[{k:r[k] for k in ('id','revision','revision_digest')} for r in selected]
+                trace={'selected_tokens':0,'lookup':'PINNED_OFFER','candidate_count':len(hits)}
+            else:
+                # The Host can bind a frozen, behavior-specific mechanism. When
+                # exactly one approved revision passed every runtime predicate,
+                # use its exact trigger as an additional recall term. Never scan
+                # drafts or infer eligibility from a user's query.
+                anchor = None
+                if purpose=='runtime' and match_only and len(selected)==1:
+                    family=run['data']['manifest'].get('task_family') or ''
+                    key='task_family:'+family
+                    if (trial or family.startswith('mechanism:')) and facts.get(key) is True and key in approved_triggers[selected[0]['id']]:
+                        anchor=key
+                hits,trace=retriever.rank_experiences(selected,query,
+                    symbols=(*symbols,anchor) if anchor else symbols,limit=limit,token_budget=token_budget,semantic=semantic)
+                if anchor:trace['host_mechanism_recall']=anchor
         except RepoError as exc:
             audit={'purpose':purpose,'scope':scope,'run_id':run_id,'error':exc.code,
                 'seconds':time.monotonic()-started,'selected':[],'injected_tokens':0,
@@ -282,7 +312,8 @@ class ExperienceConsolidation:
             trace['ranked_tokens']=trace['selected_tokens']
             trace['selected_tokens']=sum(estimate_tokens(hit) for hit in hits)
             trace.update(purpose=purpose,scope=scope,run_id=run_id,release_digest=release_digest,
-                filters=filters,selected=[h['id'] for h in hits],seconds=time.monotonic()-started)
+                filters=filters,selected=[h['id'] for h in hits],seconds=time.monotonic()-started,
+                match_view='DESCRIPTION_AND_TRIGGERS' if match_only and purpose=='runtime' else 'FULL')
             trace_id=digest(trace)
             self.repo.put('retrieval_traces',trace_id,trace,c)
             self.repo.derive(trace_id,[h['revision_digest'] for h in hits],c)

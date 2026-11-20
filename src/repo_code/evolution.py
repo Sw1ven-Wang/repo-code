@@ -164,13 +164,19 @@ class EvolutionEngine:
 
         The old raw-trace-to-knowledge draft route is retired. No activation.
         """
-        from .episodes import EpisodeBuilder
+        from .verified_stages import VerifiedStages
+        stages=VerifiedStages(self.service.runtime)
+        run_ids=list(dict.fromkeys(run_ids))
+        wanted=set(run_ids)
+        candidates=[stages.payload(row) for row in self.store.values(stages.KIND)
+                    if row['payload']['run_id'] in wanted]
         reports=[]
         for run_id in run_ids:
             run=self.service.runtime.run(run_id)
             if run['data']['visibility']!='DEV':raise RepoError('HIDDEN_DATA_DENIED')
             actual=run['data']['manifest']['scope']
             if scope!='project' and scope!=actual:raise RepoError('MEMORY_SOURCE_SCOPE')
-            for episode_id in EpisodeBuilder(self.store).capture_run(run_id):
+        for stage in sorted(candidates,key=lambda s:s['sequence']):
+            for episode_id in stages.materialize(stage['id']):
                 reports.append(await self.curate_episode(episode_id))
         return {'contract':'episode-curation-r3','reports':reports,'release_activated':False}

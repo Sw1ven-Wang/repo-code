@@ -260,10 +260,11 @@ class Broker:
             raise RepoError("PROBE_ASSERTION_REQUIRED", "Supply only Python assert statements using observed, with no stdin override.")
         return command, ''
 
-    def _native_binding_handles(self,run,query):
+    def _native_binding_handles(self,run,query,*,contract_ref=None,offset=0):
         """Discovery of already offered guidance, never Draft activation."""
         if (not self.store.get('session_run',run['id'])
                 and not self.store.get('operator_config','capability_router',default={}).get('enabled')):
+            if contract_ref:raise RepoError('CAPABILITY_BINDING_OFFER_REQUIRED')
             return []
         from .capabilities import CapabilityRouter
         from .memory.consolidation import Consolidator
@@ -280,6 +281,9 @@ class Broker:
         reducer=WorkingStateReducer(owner.repo,self.runtime);key,state=reducer.reduce(run['id'])
         phase=reducer.intent(run['id'],key,state,self.runtime.current_goal(run)).phase
         router=CapabilityRouter(owner)
+        if contract_ref:
+            return router.read_offered(run['id'],contract_ref,offset,phase=phase,facts=facts,
+                                       file_versions={p:v['blob'] for p,v in ws.manifest()['files'].items()})
         route=router.route(run['id'],query or self.runtime.current_goal(run),phase=phase,facts=facts,
                            file_versions={p:v['blob'] for p,v in ws.manifest()['files'].items()})
         return router.pending_bindings(run['id'],route)
@@ -340,6 +344,8 @@ class Broker:
             owner=Consolidator(MemoryRepository(self.store),self.runtime,MemoryProfile(mode='lexical_only'))
             return bind(CapabilityRouter(owner),run['id'],**a)
         if n in {"memory.search","skill.search"}:
+            if n=="skill.search" and a.get("contract_ref"):
+                return self._native_binding_handles(run,None,contract_ref=a["contract_ref"],offset=a.get("offset",0))
             m=run["data"]["manifest"]
             if m.get("memory_schema_version")==2:
                 memory=getattr(self,"memory",None)
@@ -351,7 +357,7 @@ class Broker:
                 result={"matches":Knowledge(self.store).search(m["knowledge_snapshot_digest"],m["knowledge_index_digest"],a.get("query") or self.runtime.current_goal(run),a["top_k"],"skill" if n=="skill.search" else None)}
             handles=self._native_binding_handles(run,a.get('query'))
             if handles and n=='skill.search':
-                native=[{'id':h['contract_ref'],'kind':'PORTABLE_DECISION_CAPABILITY','status':'OFFERED_UNBOUND',
+                native=[{'id':h['contract_ref'],'kind':'OFFERED_CONTRACT_REFERENCE' if h.get('view')=='REFERENCE_ONLY' else 'PORTABLE_DECISION_CAPABILITY','status':'OFFERED' if h.get('view')=='REFERENCE_ONLY' else 'OFFERED_UNBOUND',
                          **h,'grants_authority':False} for h in handles]
                 result['matches']=(native+result['matches'])[:a['top_k']]
             elif handles:

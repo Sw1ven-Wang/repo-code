@@ -18,10 +18,10 @@ async def initial(tmp_path):
     owner=Consolidator(MemoryRepository(app.store),app.runtime,MemoryProfile(mode='lexical_only'))
     return app,run,owner
 
-async def learn(app,owner,run=None,*,goal='Independent task A',change=None,claim_updates=None,consolidate=True):
+async def learn(app,owner,run=None,*,goal='Independent task A',change=None,claim_updates=None,consolidate=True,family='editing-boundary'):
     if run is None:run=app.new_task(goal,app.store.root.parent/'source',authorize_write=True,authorize_process=True)
     with app.store.tx() as c:
-        current=app.runtime.run(run['id'],c);current['data']['manifest']['task_family']='editing-boundary'
+        current=app.runtime.run(run['id'],c);current['data']['manifest']['task_family']=family
         app.runtime.update(c,current,data=current['data'])
     await tool(app,run,'create',{'path':'fixed.py','content':'value=1'},'write')
     with app.store.tx() as c:
@@ -54,24 +54,42 @@ def hybrid(owner):
     owner.retriever=DynamicRetriever(owner.repo,owner.profile,encoder)
     return encoder
 
-def approved_fixture(app,owner,source_run,decision,**overrides):
+def approved_fixture(app,owner,source_run,decision,*,goal='Review the same task',family='editing-boundary',**overrides):
     """Trusted operator-baseline fixture only; never activates a candidate Release."""
     record=ExperienceConsolidation(owner).get(decision['entity_id'])
     entry={'experience_id':record['id'],'revision':record['revision'],'revision_digest':record['revision_digest'],
-        'scope':record['conditions']['scope'],'task_family':'editing-boundary','status':'ACTIVE','phases':['DEBUG'],**overrides}
+        'scope':record['conditions']['scope'],'task_family':family,'status':'ACTIVE','phases':['DEBUG'],**overrides}
     base=app.releases.get(app.releases.active()['digest']);components={**base.components,
         'skills_index':app.store.json_blob({'kind':'config','skills':[entry]})}
     release=Release(components=components,base_digest=None,worker_build_digest=base.worker_build_digest,
         dependencies_digest=base.dependencies_digest,gate_policy_digest=base.gate_policy_digest,
         build_attestation_digest=app.store.json_blob({'type':'operator_baseline_fixture','components':components}))
     app.store.put('release',release.digest,release,immutable=True)
-    run=app.runtime.create('Review the same task',app.store.root.parent/'source',release.digest,
+    run=app.runtime.create(goal,app.store.root.parent/'source',release.digest,
         task_id=source_run['task_id'],task_revision=2,expected_active=source_run['id'])
     with app.store.tx() as c:
-        current=app.runtime.run(run['id'],c);current['data']['manifest']['task_family']='editing-boundary'
+        current=app.runtime.run(run['id'],c);current['data']['manifest']['task_family']=family
         app.runtime.update(c,current,data=current['data'])
     facts={**{v:True for v in PROCEDURE['triggers']},**{v:False for v in PROCEDURE['exclusions']}}
     return run,facts
+
+@pytest.mark.asyncio
+async def test_verified_mechanism_recalls_one_approved_revision_but_never_overrides_exclusions(tmp_path):
+    app,run,owner=await initial(tmp_path)
+    family='mechanism:once';key='task_family:'+family
+    try:
+        def update(v):
+            v['procedure'].update(triggers=[key],exclusions=['run_cancelled'])
+        source,_,decision=await learn(app,owner,run,change=update,family=family)
+        current,_=approved_fixture(app,owner,source,decision,family=family)
+        for cancelled in (False,True):
+            hits,tid=owner.retrieve_experiences('zyxwvu',purpose='runtime',run_id=current['id'],
+                facts={key:True,'run_cancelled':cancelled},match_only=True)
+            trace=owner.repo.get('retrieval_traces',tid)
+            assert bool(hits)==(not cancelled)
+            assert trace.get('host_mechanism_recall')==(None if cancelled else key)
+        assert not app.store.values('application_receipt')
+    finally:app.close()
 
 @pytest.mark.asyncio
 async def test_exact_duplicate_adds_support_without_copying_canonical_skill(tmp_path):

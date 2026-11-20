@@ -309,13 +309,17 @@ class Runtime:
                 for eid in decision.evidence_ids:
                     e=Evidence.model_validate(self.store.get("evidence",eid,c));es[e.check_id]=e
                 valid,reason=delivery_verified(intent,self.contract(run),es,decision.artifact_digest,self.store)
-                if not decision.verified or not valid:return {"status":"NOT_VERIFIED","reason":reason}
+                from .verified_stages import record_stage
+                if not decision.verified or not valid:
+                    record_stage(self, run["id"], c, intent=intent, decision=decision)
+                    return {"status":"NOT_VERIFIED","reason":reason}
                 delivery={"id":uid("delivery-"),"run_id":run["id"],"outcome":"VERIFIED","coverage":"registered_checks_only","task_spec_revision":intent.task_spec_revision,"contract_digest":intent.contract_digest,"release_digest":intent.release_digest,"knowledge_snapshot_digest":intent.knowledge_snapshot_digest,"knowledge_index_digest":intent.knowledge_index_digest,"source_digest":intent.source_digest,"artifact_digest":decision.artifact_digest,"evidence_ids":decision.evidence_ids,"intent_digest":intent.digest,"control_epoch":run["control_epoch"],"writer_epoch":run["writer_epoch"]}
                 seq=self.store.emit(c,run["id"],"delivery.committed",delivery,run["data"]["visibility"]);delivery["sequence"]=seq
                 c.execute("INSERT INTO deliveries VALUES(?,?,?)",(run["id"],delivery["id"],canonical(delivery).decode()))
                 self.update(c,run,state="SUCCEEDED")
                 faults.hit("delivery_before_outbox")
                 c.execute("INSERT INTO outbox(event_sequence,kind,data) VALUES(?,?,?)",(seq,"DELIVERY",canonical(delivery).decode()))
+                record_stage(self, run["id"], c, intent=intent, decision=decision)
         return {"status":"COMMITTED","delivery":delivery}
     def resume_after_failed_verification(self,run_id,decision):
         with self.store.tx() as c:

@@ -35,18 +35,26 @@ class EpisodeBuilder:
         self.store.put('l1_episode_cursor',key,{'episode_ids':[],'through':end},c,immutable=True)
         return []
 
-    def capture_run(self, run_id, *, through=None, c=None, pipeline=None):
+    def capture_run(self, run_id, *, through=None, c=None, pipeline=None, stage=None, enqueue=True):
+        """History inspection, or materialization at one verified stage boundary."""
         if c is None:
-            with self.store.tx() as conn:return self.capture_run(run_id,through=through,c=conn,pipeline=pipeline)
+            with self.store.tx() as conn:return self.capture_run(run_id,through=through,c=conn,pipeline=pipeline,stage=stage,enqueue=enqueue)
         if pipeline=='causal_v2' or (pipeline is None and self.store.get('operator_config','curator_evidence_pipeline',c,default={}).get('enabled')):
-            original=self.capture_run(run_id,through=through,c=c,pipeline='legacy')
+            original=self.capture_run(run_id,through=through,c=c,pipeline='legacy',stage=stage,enqueue=stage is None and enqueue)
             return [self.capture_causal(e,c) for e in original]
         row=c.execute('SELECT * FROM runs WHERE id=?',(run_id,)).fetchone()
         if not row:return []
         run={**dict(row),'data':json.loads(row['data'])}
-        rows=c.execute('SELECT * FROM events WHERE run_id=? ORDER BY sequence',(run_id,)).fetchall()
+        rows=c.execute('SELECT * FROM events WHERE run_id=? AND (? IS NULL OR sequence<=?) ORDER BY sequence',
+                       (run_id,through,through)).fetchall()
         events=[{**dict(e),'data':json.loads(e['data'])} for e in rows]
         triggers=[e for e in events if e['type'] in self.TRIGGERS and (through is None or e['sequence']<=through)]
+        if stage is not None:
+            from .verified_stages import VerifiedStages
+            triggers=[e for e in events if e['sequence']==through==stage['sequence']
+                      and e['type']==VerifiedStages.EVENT and e['event_id']==stage['event_id']
+                      and e['visibility']=='DEV' and digest(e['data'])==stage['event_digest']]
+            if not triggers:raise RepoError('L1_STAGE_SOURCE_CHANGED')
         if not triggers:return []
         trigger=triggers[-1];end=trigger['sequence']
         cursor_key=digest([run_id,end])
@@ -63,6 +71,9 @@ class EpisodeBuilder:
         roots=[run_id,run['task_id'],manifest['workspace_baseline_digest'],
                manifest.get('knowledge_snapshot_digest')]
         roots=[r for r in roots if r]
+        if stage is not None:
+            roots.extend([stage['id'],stage['source_digest'],*stage['refs']])
+            for pair in stage.get('local_repair_pairs',[]):roots.extend([pair['before'],pair['after']])
         denial=None
         if run['data']['visibility']!='DEV' or any(e['visibility']!='DEV' for e in events):
             denial='NON_DEV_TRACE'
@@ -70,7 +81,12 @@ class EpisodeBuilder:
             denial='PROTECTED_EVALUATION_CONTENT'
         try:self._authorized(roots,c)
         except RepoError as exc:denial=exc.code
-        reason=run['data'].get('end_reason','')
+        reason=run['data'].get('end_reason','') if stage is None else ''
+        if stage is not None:
+            # Carry only the Host-linked original failed check into the repair stage.
+            prior_failed={p['failed'] for p in stage.get('local_repair_pairs',[])}
+            events=[e for e in events if e['sequence']>stage['after'] or
+                    (e['type']=='tool.operation_finished' and e['data'].get('operation_id') in prior_failed)]
         failure_class='UNKNOWN'
         if str(reason).startswith(('BLOCKED_ENV','SANDBOX_UNAVAILABLE','BASE_COMMIT_CHECK_FAILED')):
             failure_class='ENVIRONMENT';denial='KNOWN_ENVIRONMENT_FAILURE'
@@ -92,14 +108,15 @@ class EpisodeBuilder:
             args=json.loads(op['request'])['arguments'] if op else {}
             if op:
                 raw=json.loads(op['result'])
-                if raw.get('truncated') and raw.get('result_artifact'):
+                if raw.get('truncated') and (raw.get('result_artifact') or raw.get('artifact')):
                     # Read only a run-owned immutable result, never grading files.
-                    ref=raw['result_artifact']
-                    if self.store.get('run_artifact',digest([run_id,ref]),c):
-                        try:body=self.store.read_json(ref)
-                        except (RepoError,FileNotFoundError,ValueError):
-                            return self._deny(c,cursor_key,run_id,end,roots,'INVALID_SOURCE_ARTIFACT')
-                        artifacts.add(ref)
+                    ref=raw.get('result_artifact') or raw['artifact']
+                    if not self.store.get('run_artifact',digest([run_id,ref]),c):
+                        return self._deny(c,cursor_key,run_id,end,roots,'EVIDENCE_ARTIFACT_DENIED')
+                    try:body=self.store.read_json(ref)
+                    except (RepoError,FileNotFoundError,ValueError):
+                        return self._deny(c,cursor_key,run_id,end,roots,'INVALID_SOURCE_ARTIFACT')
+                    artifacts.add(ref)
             if self._protected(body):
                 return self._deny(c,cursor_key,run_id,end,roots,'PROTECTED_EVALUATION_CONTENT')
             output=body.get('output_snapshot')
@@ -131,26 +148,26 @@ class EpisodeBuilder:
         except (RepoError,FileNotFoundError) as exc:
             return self._deny(c,cursor_key,run_id,end,roots,
                 exc.code if isinstance(exc,RepoError) else 'EPISODE_SOURCE_MISSING')
+        used=run['data']['budget_used'] if stage is None else stage['budget_used']
         trace={'run_id':run_id,'task_id':run['task_id'],'task_revision':manifest['task_spec_revision'],
                'release_digest':manifest['release_digest'],'contract_digest':manifest['contract_digest'],
                'environment_digest':manifest['environment_digest'],'visibility':'DEV','scope':manifest['scope'],
                'event_range':[events[0]['sequence'],end],
                'event_refs':[{'id':e['event_id'],'sequence':e['sequence'],'digest':digest(e)} for e in events],
                'operation_ids':operations,'artifact_refs':sorted(artifacts),
-               'trace_digest':digest(events),'usage_summary':run['data']['budget_used'],
+               'trace_digest':digest(events),'usage_summary':used,
                'derived_from':roots}
         trace_id=digest(trace);trace['id']=trace_id
         self.store.put('trace_manifest',trace_id,trace,c,immutable=True)
         for parent in [*roots,*[e['event_id'] for e in events],*artifacts]:
             c.execute('INSERT OR IGNORE INTO lineage VALUES(?,?)',(trace_id,parent))
-        used=run['data']['budget_used']
         high=(correction or bool(recoveries) or bool(failures) or
               (run['state'] in {'PARTIAL','BLOCKED','FAILED'} and latest!=baseline)
               or reason in {'NO_PROGRESS','STAGNATION_AFTER_WRITE'})
         medium=not high and (len(writes)>=3 or used.get('model_calls',0)>=30 or used.get('tool_calls',0)>=80)
-        priority='HIGH' if high else 'MEDIUM' if medium else 'LOW'
+        priority='HIGH' if high else 'MEDIUM' if medium or stage is not None else 'LOW'
         episode_ids=[]
-        if high or medium:
+        if high or medium or stage is not None:
             start=min([*writes,*failures] or [events[0]['sequence']])
             selected=[e for e in events if start<=e['sequence']<=end]
             episode_id=digest([run_id,start,end,trigger['event_id']])
@@ -168,6 +185,13 @@ class EpisodeBuilder:
                 'outcome':'RESOLVED' if recoveries or run['state']=='SUCCEEDED' else 'PARTIAL' if run['state']=='PARTIAL' else 'UNKNOWN',
                 'epistemic_status':'observed','status':'CANDIDATE','priority':priority,
                 'cost':used,'derived_from':[trace_id,*[e['event_id'] for e in selected]]}
+            if stage is not None:
+                episode.update(stage_candidate_id=stage['id'],source_version=stage['source_digest'],
+                    actual={**episode['actual'],'terminal_state':None,'run_state_at_check':stage['run_state'],
+                            'verified_stage':stage['outcome'],'verification_kind':stage['kind']},
+                    stage_type='RECOVERY' if recoveries else 'VERIFY',
+                    outcome=('RESOLVED' if stage['outcome'] in {'DELIVERY_VERIFIED','NEW_CHECK_PASSED'}
+                             else 'PARTIAL'))
             self.store.put('l1_episode',episode_id,episode,c,immutable=True)
             for parent in episode['derived_from']:
                 c.execute('INSERT OR IGNORE INTO lineage VALUES(?,?)',(episode_id,parent))
@@ -182,8 +206,9 @@ class EpisodeBuilder:
             self.store.put('pattern',pattern_id,pattern,c)
             job_id=digest(['episode-curator-job',episode_id])
             # Separate kind: the existing L1 worker must not consume a Curator job.
-            c.execute('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?)',
-                      (job_id,'L1_CURATE',episode_id,'QUEUED',json.dumps({'episode_id':episode_id,'max_model_calls':2,'default_model_calls':1})))
+            if enqueue:
+                c.execute('INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?)',
+                          (job_id,'L1_CURATE',episode_id,'QUEUED',json.dumps({'episode_id':episode_id,'max_model_calls':2,'default_model_calls':1})))
             episode_ids.append(episode_id)
         self.store.put('l1_triage_audit',cursor_key,{'run_id':run_id,'through':end,'priority':priority,
             'trace_manifest_ref':trace_id,'episode_ids':episode_ids,'derived_from':[trace_id]},c,immutable=True)
@@ -214,7 +239,8 @@ class EpisodeBuilder:
             'core_event_range':old['event_range'],'event_range':[selected[0]['sequence'],selected[-1]['sequence']],
             'segments':segments,'source_event_ids':refs,'support_refs':refs,'source_digest':source_digest,
             'selection_version':'episode-v2','causal_links':links,
-            'verification_incomplete':not bool(old['actual']['recoveries'] or old['outcome']=='RESOLVED'),
+            'verification_incomplete':old['outcome']!='RESOLVED' if old.get('stage_candidate_id')
+                else not bool(old['actual']['recoveries'] or old['outcome']=='RESOLVED'),
             'derived_from':[episode_id,trace['id'],*refs]}
         value['episode_digest']=digest(value)
         self.store.put('l1_episode',new_id,value,c,immutable=True)

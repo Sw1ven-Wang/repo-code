@@ -32,6 +32,9 @@ async def test_native_offered_capability_is_discoverable_even_with_empty_legacy_
         assert len(matches)==1 and matches[0]['kind']=='PORTABLE_DECISION_CAPABILITY'
         assert matches[0]['contract_ref']==route['contract_refs'][0] and matches[0]['route_id']==route['id']
         assert not matches[0]['grants_authority'] and not app.store.values('capability_binding')
+        _,read_page=await tool(app,run,'skill.search',{'contract_ref':matches[0]['contract_ref'],'offset':0},'page')
+        assert read_page['status']=='SUCCEEDED' and read_page['result']['route_id']==route['id']
+        assert read_page['result']['authority']=='ADVISORY_ONLY' and not app.store.values('capability_binding')
         await tool(app,run,'read',{'path':'a.py'},'observe')
         bind(router,run['id'],**args(route,'a.py'))
         _,result=await tool(app,run,'skill.search',{'query':'RETENTION_RULE','top_k':1},'after-bind')
@@ -60,6 +63,8 @@ async def test_unoffered_cross_run_and_revoked_capabilities_are_not_discovered(t
         other=app.new_task('RETENTION_RULE',app.store.root.parent/'source')
         _,result=await tool(app,other,'skill.search',{'query':'RETENTION_RULE','top_k':2},'other')
         assert not result['result']['matches']
+        _,page=await tool(app,other,'skill.search',{'contract_ref':route['contract_refs'][0]},'foreign-page')
+        assert page['result']['is_error'] and 'content' not in page['result']
         router.owner.repo.revoke(route['source_revisions'][0])
         _,result=await tool(app,run,'skill.search',{'query':'RETENTION_RULE','top_k':2},'revoked')
         assert result['result'].get('is_error') or not result['result']['matches']

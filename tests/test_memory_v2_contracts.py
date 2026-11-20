@@ -237,18 +237,19 @@ async def test_RET_10_unmatched_query_returns_empty(memory_app):
 
 
 @pytest.mark.asyncio
-async def test_CON_01_terminal_event_automatically_creates_candidate(memory_app):
+async def test_CON_01_unchecked_terminal_event_does_not_create_experience(memory_app):
     app,run,_=memory_app;app.runtime.end(run['id'],'PARTIAL','incomplete checks')
     await app.memory.on_terminal(run['id'])
     rows=app.memory.repo.values('memory_versions')
-    assert len(rows)==1 and rows[0]['support_refs'][0]['source_kind']=='verification'
+    assert not rows and not app.store.values('l1_stage_candidate')
     assert app.memory.repo.values('memory_jobs')[0]['state']=='DONE'
 
 
 @pytest.mark.asyncio
 async def test_CON_02_failure_is_observation_not_success_recipe(memory_app):
     app,run,_=memory_app;app.runtime.end(run['id'],'FAILED','assertion failed');await app.memory.on_terminal(run['id'])
-    value=app.memory.repo.values('memory_versions')[0]
+    assert not app.memory.repo.values('memory_versions')
+    value=app.memory.consolidator.terminal_claim(run['id'])[0].model_dump()
     assert value['kind']=='EPISODE' and 'FAILED' in value['text'] and value['epistemic_status']=='OBSERVED'
 
 
@@ -291,7 +292,7 @@ def test_CON_07_hidden_ancestor_blocks_learning(memory_app):
 async def test_CON_08_job_replay_is_idempotent(memory_app):
     app,run,_=memory_app;app.runtime.end(run['id'],'PARTIAL','stopped')
     await app.memory.on_terminal(run['id']);await app.memory.on_terminal(run['id'])
-    assert len(app.memory.repo.values('memory_versions'))==1 and len(app.memory.repo.values('memory_jobs'))==1
+    assert not app.memory.repo.values('memory_versions') and len(app.memory.repo.values('memory_jobs'))==1
 
 
 def test_GOV_01_activation_only_visible_to_next_run(memory_app):
@@ -514,20 +515,19 @@ def test_empty_strict_snapshot_still_requires_available_models(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_final_report_includes_post_task_consolidation_cost(tmp_path):
+async def test_final_report_excludes_deferred_curation_cost(tmp_path):
     source=tmp_path/'source';source.mkdir()
     p=ScriptedProvider([Assistant(text='Finished exploration',usage={'input_tokens':10,'output_tokens':2}),
                         Assistant(text='{"status":"COMPLETE","claims":[]}',usage={'input_tokens':20,'output_tokens':3})])
     app=RepoCode(tmp_path/'host',p,'local',memory_profile=MemoryProfile(mode='lexical_only'))
     run=app.new_task('Explore the empty fixture',source)
-    # A valuable failed-check signal exercises post-task extraction. Ordinary
-    # LOW exploration now deliberately avoids a generative consolidation call.
+    # A raw failure before handoff does not trigger a Curator request.
     with app.store.tx() as c:
         app.store.emit(c,run['id'],'tool.operation_finished',{'tool_name':'process.run',
             'result':{'exit_code':1,'stderr':'AssertionError: observed counterexample'}},'DEV')
     result=await app.execute(run['id'])
-    assert result['memory_cost']['known_total_tokens']==35
-    assert result['memory_cost']['by_purpose']['consolidation']['calls']==1
+    assert result['memory_cost']['known_total_tokens']==12
+    assert p.calls==1 and not app.store.values('l1_stage_candidate')
 
 
 def test_legacy_search_facade_does_not_silently_downgrade_v2(memory_app):
@@ -737,24 +737,3 @@ async def test_standard_trials_keep_v2_but_disable_cross_task_learning(memory_ap
     assert app.memory.repo.values('memory_versions')==before
     assert not app.memory.repo.values('memory_jobs') and closed==[]
     assert 'memory_cost' in result
-
-
-@pytest.mark.asyncio
-async def test_trusted_partial_stage_is_idempotent_history_and_never_delivery(memory_app):
-    app,run,_=memory_app
-    from repo_code.models import PreparedDecision
-    intent='test-only-stage-intent'
-    app.store.put('intent',intent,{'run_id':run['id'],'source_digest':app.runtime.workspace(run).snapshot()})
-    app.store.put('evidence','unit-stage-evidence',{'id':'unit-stage-evidence','check_id':'one-of-two','status':'PASSED'})
-    decision=PreparedDecision(intent_digest=intent,verified=False,reason='Other required check failed',evidence_ids=['unit-stage-evidence'])
-    decision=decision.model_copy(update={'signature':app.store.sign(decision.model_dump(mode='json',exclude={'signature'}))})
-    app.store.put('decision',intent,decision)
-    await app.memory.on_verified_stage(run['id'],decision)
-    await app.memory.on_verified_stage(run['id'],decision)
-    claims=app.memory.repo.values('memory_versions')
-    assert len(claims)==1 and claims[0]['kind']=='EPISODE' and claims[0]['validity']=='HISTORICAL'
-    assert '"task_delivery_verified":false' in claims[0]['text']
-    assert len(app.memory.repo.values('memory_jobs'))==1
-    assert app.runtime.run(run['id'])['state']=='RUNNING' and app.agent.report(run['id'])['delivery'] is None
-    with pytest.raises(RepoError,match='UNTRUSTED_DECISION'):
-        await app.memory.on_verified_stage(run['id'],decision.model_copy(update={'verified':True}))

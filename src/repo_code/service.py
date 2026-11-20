@@ -56,15 +56,6 @@ class RepoCode:
             try:result=await self._execute_owned(run_id,expose_control)
             finally:
                 from .models import TERMINAL
-                if self.runtime.run(run_id)['state'] in TERMINAL:
-                    try:
-                        from .episodes import EpisodeBuilder
-                        EpisodeBuilder(self.store).capture_run(run_id)
-                    except Exception as exc:
-                        with self.store.tx() as c:
-                            self.store.emit(c,run_id,'l1.observation_deferred',
-                                            {'code':getattr(exc,'code',type(exc).__name__)},
-                                            manifest.get('visibility','TRUSTED_ONLY'))
                 if self.memory and manifest["manifest"].get("memory_schema_version")==2 and self.runtime.run(run_id)['state'] in TERMINAL:
                     try:await self.memory.on_terminal(run_id)
                     except Exception as exc:

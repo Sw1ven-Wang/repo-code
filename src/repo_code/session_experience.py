@@ -25,12 +25,12 @@ class SessionExperiences:
     def accumulation(self,key):
         """Inspect native cross-task evidence, not a new raw-trace learning DB.
 
-        Capture is idempotent and also recovers an interrupted terminal hook.
         Raw tool errors are observations, not inferred learning opportunities.
+        Candidate pointers are separate from the Episodes expanded by Curator.
         No candidate is auto-admitted and no model is called here.
         """
         from .episodes import EpisodeBuilder
-        from .models import TERMINAL
+        from .verified_stages import VerifiedStages
         session=self.get(key)
         if session.get('kind')!='MULTITASK_COLLECTION':raise RepoError('NOT_MULTITASK_COLLECTION')
         runs=[];episodes={};filtered=[];error_count=0
@@ -41,8 +41,6 @@ class SessionExperiences:
             run=self.runtime.run(p['run_id']);m=run['data']['manifest']
             if run['data']['visibility']!='DEV' or p['scope']!=session['scope'] or m['scope']!=session['scope']:continue
             runs.append(run)
-            if run['state'] in TERMINAL:
-                builder.capture_run(run['id'])
             for episode in self.store.values('l1_episode'):
                 if episode['run_id']!=run['id']:continue
                 try:episodes[episode['episode_id']]=builder.get(episode['episode_id'])
@@ -64,7 +62,13 @@ class SessionExperiences:
                     'episode_ids':sorted({p['episode_ref'] for p in support}),
                     'distinct_tasks':len({episodes[p['episode_ref']]['task_id'] for p in support}),
                     'classification':'NATIVE_STAGE_GROUP_NOT_PROVEN_COMMON_ROOT_CAUSE'})
+        stages=VerifiedStages(self.runtime)
+        stage_ids=[]
+        for row in self.store.values(stages.KIND):
+            p=stages.payload(row)
+            if p['collection']==key and p['run_id'] in members:stage_ids.append(p['id'])
         value={'collection_id':key,'scope':session['scope'],'run_ids':sorted(members),
+               'stage_candidates':stage_ids,
             'distinct_tasks':len({r['task_id'] for r in runs}),
             'raw_tool_error_observations':error_count,'episodes':sorted(episodes),
             'patterns':patterns,'filtered':filtered,'automatic_activation':False}

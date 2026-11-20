@@ -8,6 +8,8 @@ import re
 import time
 from ..util import RepoError, digest, now,uid
 
+EXPERIENCE_QUERY_CHAR_LIMIT = 8000
+
 
 def terms(text):
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
@@ -151,7 +153,7 @@ class DynamicRetriever:
         """Rank pre-authorized structured records; no Trace text is indexed here."""
         from ..context import estimate_tokens
         if isinstance(limit,bool) or not isinstance(limit,int) or not 0<=limit<=20:raise RepoError('INVALID_MEMORY_POLICY')
-        if not isinstance(query,str) or len(query)>8000:raise RepoError('INVALID_MEMORY_QUERY')
+        if not isinstance(query,str) or len(query)>EXPERIENCE_QUERY_CHAR_LIMIT:raise RepoError('INVALID_MEMORY_QUERY')
         if token_budget is not None and (isinstance(token_budget,bool) or not isinstance(token_budget,int) or token_budget<0):raise RepoError('INVALID_MEMORY_POLICY')
         budget=self.profile.evidence_tokens if token_budget is None else min(token_budget,self.profile.evidence_tokens)
         if not query.strip() or not limit or not budget:
@@ -188,19 +190,28 @@ class DynamicRetriever:
             if len(values)!=len(candidates) or any(not math.isfinite(v) for v in values):raise RepoError('MEMORY_RERANK_INVALID')
             rerank=dict(zip(candidates,values));reranker_seconds=time.monotonic()-before
             candidates.sort(key=lambda k:(-rerank[k],-scores[k],k))
-        hits=[];used=0
+        hits=[];used=0;budget_skips=[]
         for k in candidates if limit and budget else []:
             if k in rerank and rerank[k]<self.profile.rerank_min_score:continue
             hit={**items[k],'rrf_score':scores[k],'rerank_score':rerank.get(k),'authority':'ADVISORY_ONLY'}
             cost=estimate_tokens(hit)
-            if used+cost>budget:continue
+            if used+cost>budget:
+                row=items[k]
+                if (set(row)!={'id','revision','revision_digest','text'} or type(row['revision']) is not int
+                        or row['revision']<1 or not re.fullmatch(r'sha256:[0-9a-f]{64}',row['revision_digest'])):
+                    budget_skips.append({'id':k,'reason':'FULL_RECORD_EXCEEDS_BUDGET'});continue
+                hit={field:row[field] for field in ('id','revision','revision_digest')}
+                hit.update(view='REFERENCE_ONLY',authority='ADVISORY_ONLY')
+                cost=estimate_tokens(hit)
+                if used+cost>budget:
+                    budget_skips.append({'id':k,'reason':'REFERENCE_EXCEEDS_BUDGET'});continue
             hits.append(hit);used+=cost
             if len(hits)>=limit:break
         return hits,{'channels':channels,'candidate_count':len(candidates),'eligible_count':len(items),
             'dense_calls':dense_calls,'dense_seconds':dense_seconds,'reranker_calls':reranker_calls,
             'reranker_items':len(candidates) if reranker_calls else 0,'reranker_seconds':reranker_seconds,
             'index_build_seconds':index_seconds,'seconds':time.monotonic()-started,
-            'selected_tokens':used,'injected_tokens':0,'automatic_merge':False}
+            'selected_tokens':used,'budget_skips':budget_skips,'injected_tokens':0,'automatic_merge':False}
 
     def retrieve(self, intent, file_versions, limit=6, token_budget=None):
         from ..context import estimate_tokens

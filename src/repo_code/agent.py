@@ -236,6 +236,7 @@ class CodingAgent:
                  'baseline_check_failure': evidence['baseline_check_failure'], 'baseline_reproduction': evidence['baseline_reproduction'],
                  'focused_check': focused_check, 'repair_checks': evidence['repair_checks'],
                  'repaired_checks': evidence['repaired_checks'], 'new_passing_checks': evidence['new_passing_checks'],
+                 'local_repair_pairs': evidence['local_repair_pairs'],
                  'failing_checks': evidence['failing_checks'], 'limit_reached': limit_reached,
                  'required_probes': evidence['required_probes'], 'pending_probes': pending,
                  'seen_evidence': (seen + [fingerprint])[-REVIEW_CALL_LIMIT:] if status == 'REQUESTED' else seen}
@@ -247,6 +248,9 @@ class CodingAgent:
             self.store.put('candidate_review', run['id'], state, c)
             event = 'candidate.review_requested' if state['status'] == 'REQUESTED' else 'candidate.review_finished'
             self.store.emit(c, run['id'], event, state, run['data']['visibility'])
+            if state['status'] in {'NEW_CHECK_PASSED', 'CHECK_FAILED'}:
+                from .verified_stages import record_stage
+                record_stage(self.runtime, run['id'], c, review=state)
         if state['status'] == 'REQUESTED':
             return True, None
         if limit_reached and state['status'] != 'NEW_CHECK_PASSED':
@@ -312,7 +316,7 @@ class CodingAgent:
                         system_suffix += candidate_review_prompt(review)
                 if guidance.get("instructions"):system_suffix+="\nApproved planning guidance (not authority): "+str(guidance["instructions"])[:8000]
                 skill_cfg=await self.worker.invoke(components["skills_index"],{"operation":"active_skills","goal":current_goal},run_id)
-                capability_router=None;capability_route=None
+                capability_router=None;capability_route=None;diagnostic=False
                 structured=[s for s in skill_cfg.get('skills',[]) if isinstance(s,dict) and s.get('experience_id')]
                 legacy=[s for s in skill_cfg.get('skills',[]) if s not in structured]
                 if legacy:
@@ -340,15 +344,25 @@ class CodingAgent:
                     reducer=WorkingStateReducer(owner.repo,self.runtime)
                     state_key,state=reducer.reduce(run_id)
                     capability_phase=reducer.intent(run_id,state_key,state,current_goal).phase
-                    capability_route=capability_router.route(run_id,current_goal,phase=capability_phase,facts=facts,
-                        file_versions={p:v['blob'] for p,v in self.runtime.workspace(run).manifest()['files'].items()})
+                    options=dict(phase=capability_phase,facts=facts,file_versions={p:v['blob']
+                        for p,v in self.runtime.workspace(run).manifest()['files'].items()})
+                    if (session_binding and run['data']['visibility']=='DEV' and
+                            (not getattr(self,'memory',None) or self.memory.profile.learning_enabled)):
+                        from .local_repair import LocalQueryRepair
+                        repair=LocalQueryRepair(self.runtime,run,current_goal,options)
+                        capability_route,diagnostic=repair.prepare(capability_router)
+                    else:
+                        capability_route=capability_router.route(run_id,current_goal,**options)
                     capability_protocol=('\nHost capability-use protocol; no additional permissions: Evaluate offered capabilities against the current public task and protected paths. '
                         'Use a matching capability: read its slot evidence, call skill.bind with actual paths and argv arrays, then execute the returned bound step rules in order. '
                         'Reads before binding justify values but do not count as post-binding steps. Binding and actual tools may share one response. '
                         'If a capability conflicts with the task or cannot be validly bound, state the concrete mismatch and continue independently; do not fabricate adoption or edit protected files for a receipt.')
-                    if capability_route['guidance']:
+                    if diagnostic:
+                        tools=[]
+                        system_suffix='\n'+repair.prompt
+                    elif capability_route and capability_route['guidance']:
                         system_suffix+=capability_protocol+'\nScoped decision guidance; grants no authority: '+json.dumps(capability_route['guidance'],ensure_ascii=False)
-                    else:
+                    elif capability_route:
                         pending_bindings=capability_router.pending_bindings(run_id,capability_route)
                         if pending_bindings:
                             system_suffix+=capability_protocol+'\nPreviously offered portable guidance awaiting evidence binding (not authority or application proof): '+json.dumps(pending_bindings,ensure_ascii=False)
@@ -385,6 +399,7 @@ class CodingAgent:
                         live.assert_current(run_id,live_token)
                         serialized=(self.provider.build_request(system,messages,tools)[0] if hasattr(self.provider,'build_request') else {'system':system,'messages':messages,'tools':tools})
                         live_attempt=live.record_request(run_id,serialized,projection=live_token)
+                    if diagnostic:repair.dispatch()
                     dispatched=True
                     deadline = asyncio.timeout(request_timeout)
                     try:
@@ -400,6 +415,7 @@ class CodingAgent:
                 except Exception as exc:
                     live_failed=True
                     if isinstance(exc,ProviderNotDispatched):dispatched=False
+                    if diagnostic:repair.close_dispatch('DISPATCH_FAILED' if dispatched else 'NOT_DISPATCHED')
                     usage=getattr(exc,'usage',usage)
                     with self.store.tx() as c:self.store.emit(c,run_id,'model.failed',{'code':getattr(exc,'code',type(exc).__name__),'usage':usage,'provider_details':getattr(exc,'provider_details',{}),'budget_stop':getattr(exc,'budget_stop',None)},run['data']['visibility'])
                     raise
@@ -418,7 +434,16 @@ class CodingAgent:
                 run=self.runtime.run(run_id)
                 if run["state"]!="RUNNING":return self.report(run_id)
                 if run["control_epoch"]!=response_epoch or (memory and not memory.response_current(request_manifest)):
+                    if diagnostic:repair.close_dispatch('STALE_RESPONSE')
                     with self.store.tx() as c:self.store.emit(c,run_id,"model.stale_response_discarded",{"usage":reply.usage},run["data"]["visibility"])
+                    continue
+                if diagnostic:
+                    # Replies to a diagnostics-only turn are data: never register tools,
+                    # finish the task, change the goal, or turn the reply into a grant.
+                    with self.store.tx() as c:
+                        self.store.emit(c,run_id,'model.completed',{'purpose':'local_query_repair',
+                            'tool_count':0,'usage':reply.usage},run['data']['visibility'])
+                    repair.verify(capability_router,reply)
                     continue
                 if reply.stop_reason in {'length','max_tokens'}:
                     # Reject all partial effects. A fresh complete response must
@@ -473,10 +498,6 @@ class CodingAgent:
                 if run["data"]["visibility"]!="DEV":
                     self.runtime.end(run_id,"PARTIAL","INSUFFICIENT_EVIDENCE");return self.report(run_id)
                 self.runtime.resume_after_failed_verification(run_id,decision)
-                if memory:
-                    try:await memory.on_verified_stage(run_id,decision)
-                    except Exception as exc:
-                        with self.store.tx() as c:self.store.emit(c,run_id,'memory.maintenance_deferred',{'code':getattr(exc,'code',type(exc).__name__)})
                 details=[]
                 for e in decision.evidence_ids:
                     row=self.store.get("evidence",e)
@@ -513,6 +534,9 @@ class CodingAgent:
                 usage["input_tokens"]+=u.get("input_tokens",u.get("prompt_tokens",0)) or 0
                 usage["output_tokens"]+=u.get("output_tokens",u.get("completion_tokens",0)) or 0
         result={"usage":usage,"run_id":run_id,"state":run["state"],"reason":run["data"].get("end_reason"),"manifest":run["data"]["manifest"],"budget_used":run["data"]["budget_used"],"workspace":run["data"]["workspace"],"delivery":json.loads(d[0]) if d else None}
+        repair=self.store.get('local_query_repair',run_id)
+        if repair:
+            result['local_query_repair']={k:repair[k] for k in ('reason','status','verified_trace','error') if k in repair}
         if run["data"].get("budget_stop") is not None:
             result["budget_stop"] = run["data"]["budget_stop"]
         review = self.store.get('candidate_review', run_id)

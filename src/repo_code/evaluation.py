@@ -118,6 +118,20 @@ class TrialRunner:
         app.sandbox.stop_run(run_id) if run_id else None
         from .cost_metrics import trial_cost
         output['cost_vector']=trial_cost(output,getattr(provider,'records',None))
+        if run_id and output['state']!='INFRASTRUCTURE_ERROR':
+            try:
+                from .skill_impact import collect_trial_impact
+                manifest=output['manifest']
+                components=app.releases.get(release).components
+                output.update(collect_trial_impact(app.store,run_id,report,output,task=task,
+                    policy={'components':{k:v for k,v in components.items() if k!='skills_index'},
+                            'context_ceiling':self.context_ceiling,'legacy_window':self.legacy_window,
+                            'review_contract_tasks':self.review_contract_tasks,
+                            'context_compaction':manifest.get('context_compaction'),
+                            'memory_profile_digest':manifest.get('memory_profile_digest')},
+                    records=getattr(provider,'records',None)))
+            except Exception as exc:
+                output['impact_collection_error']=type(exc).__name__
         app.close()
         output['state_root']=str(state_root)
         s.store.put("trial_private" if hidden else "trial_dev",output["id"],output,immutable=True)

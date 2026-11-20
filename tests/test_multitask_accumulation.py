@@ -4,7 +4,6 @@ from repo_code.service import RepoCode
 from repo_code.providers import ScriptedProvider
 from repo_code.models import Assistant,ToolCall,Budget
 from repo_code.util import RepoError
-from repo_code.evolution import EvolutionEngine
 
 
 def test_collection_cli_arguments():
@@ -28,7 +27,7 @@ async def failed_task(app,sid,workspace):
 
 
 @pytest.mark.asyncio
-async def test_multiple_workspaces_accumulate_and_l1_reads_after_restart(tmp_path):
+async def test_unverified_errors_are_counted_across_tasks_after_restart(tmp_path):
     app=RepoCode(tmp_path/'state',ScriptedProvider(),'local')
     try:
         sid=app.session_experiences().create_collection('project:shared','boundary-learning')
@@ -39,18 +38,14 @@ async def test_multiple_workspaces_accumulate_and_l1_reads_after_restart(tmp_pat
         first=await failed_task(app,sid,workspaces[0])
         a=app.session_experiences().accumulation(sid)
         assert a['distinct_tasks']==1 and a['raw_tool_error_observations']==1
-        assert a['episodes']
+        assert a['episodes']==a['stage_candidates']==[]
         app.close()
         app=RepoCode(tmp_path/'state',ScriptedProvider(),'local')
         assert app.session_experiences().create_collection('project:shared','boundary-learning')==sid
         second=await failed_task(app,sid,workspaces[1])
         b=app.session_experiences().accumulation(sid)
         assert b['distinct_tasks']==2 and b['raw_tool_error_observations']==2
-        assert set(a['episodes'])<set(b['episodes'])
-        pattern=next(p for p in b['patterns'] if p['distinct_tasks']==2)
-        evidence=EvolutionEngine(app,app.provider).evidence(pattern['pattern_id'])
-        assert {p['run_id'] for p in evidence['problems']}=={first['id'],second['id']}
-        assert evidence['evidence_mode']=='EXACT_EPISODE_REFERENCES'
+        assert b['episodes']==b['stage_candidates']==b['patterns']==[]
         assert app.runtime.workspace(app.runtime.run(first['id'])).root!=app.runtime.workspace(app.runtime.run(second['id'])).root
         assert app.session_experiences().accumulation(sid)==b # No duplicate episodes/jobs.
         assert not app.store.values('candidate') and app.releases.active()==active
@@ -58,7 +53,7 @@ async def test_multiple_workspaces_accumulate_and_l1_reads_after_restart(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_collection_scope_isolation_revocation_and_closed_recovery(tmp_path):
+async def test_collection_scope_isolation_and_closed_recovery(tmp_path):
     app=RepoCode(tmp_path/'state',ScriptedProvider(),'local')
     try:
         sessions=app.session_experiences()
@@ -66,12 +61,8 @@ async def test_collection_scope_isolation_revocation_and_closed_recovery(tmp_pat
         other=sessions.create_collection('project:b','learning')
         w=tmp_path/'work';w.mkdir();(w/'main.py').write_text('value=1\n')
         await failed_task(app,sid,w)
-        a=sessions.accumulation(sid)
-        assert a['episodes'] and not sessions.accumulation(other)['episodes']
-        ep=app.store.get('l1_episode',a['episodes'][0])
-        app.store.put('revocation',ep['support_refs'][0],{'reason':'withdrawn'})
-        blocked=sessions.accumulation(sid)
-        assert not blocked['episodes'] and not blocked['patterns'] and blocked['filtered']
+        assert sessions.accumulation(sid)['distinct_tasks']==1
+        assert sessions.accumulation(other)['distinct_tasks']==0
         sessions.close(sid)
         with pytest.raises(RepoError,match='CLOSED'):
             sessions.create_collection('project:a','learning')

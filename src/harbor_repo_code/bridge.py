@@ -147,18 +147,28 @@ class HarborSandbox:
             meta=await self.remote(EXPORT,{'root':self.root,'archive':name,'known':remote_known})
             archive=Path(tmp)/'source.tar'
             await self.environment.download_file(name,archive)
-            with tarfile.open(archive) as tar:
-                for member in tar:
-                    relative_path(member.name)
-                    if not member.isfile():raise RepoError('HARBOR_EXPORT_NONREGULAR')
-                tar.extractall(destination,filter='data')
-        self.modes.update(meta['modes'])
-        downloaded=Workspace(destination,self.store).manifest()['files'];files={}
+            extracted=set()
+            try:
+                with tarfile.open(archive) as tar:
+                    for member in tar:
+                        extracted.add(relative_path(member.name))
+                        if not member.isfile():raise RepoError('HARBOR_EXPORT_NONREGULAR')
+                    tar.extractall(destination,filter='data')
+                downloaded=Workspace(destination,self.store).manifest()['files']
+            except OSError as exc:
+                path=Path(exc.filename).name if exc.filename else '<unknown>'
+                raise RepoError('HARBOR_SOURCE_MATERIALIZATION_FAILED',
+                                f'HARBOR_SOURCE_MATERIALIZATION_FAILED: {path}: host filesystem error (errno {exc.errno})') from exc
+        files={}
         for p,sha in meta['current'].items():
             relative_path(p)
             item=downloaded.get(p,self.synced.get(p))
-            if item is None or item['blob']!=sha:raise RepoError('HARBOR_EXPORT_DIGEST_MISMATCH')
+            if p not in downloaded and (p in extracted or item is None or item['blob']!=sha):
+                raise RepoError('HARBOR_SOURCE_MATERIALIZATION_FAILED',
+                                f'HARBOR_SOURCE_MATERIALIZATION_FAILED: {p}: expected source file missing')
+            if item['blob']!=sha:raise RepoError('HARBOR_EXPORT_DIGEST_MISMATCH')
             files[p]=item
+        self.modes.update(meta['modes'])
         return files,meta
 
     async def sync(self,workspace):

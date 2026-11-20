@@ -25,22 +25,20 @@ It has no seven-day expiry. Closing it prevents reuse; calling create again does
 not reopen it. Binding remains Host-only and must precede model/tool dispatch.
 Distinct scopes/collection names do not implicitly attach to tasks.
 
-The unchanged terminal hook captures native `trace_manifest`, `l1_episode`,
-`problem`, `pattern` and `L1_CURATE` jobs. Intermediate process failures and
-recoveries remain eligible even when a task ultimately succeeds. Collection
-inspection retries interrupted terminal capture idempotently and validates
-Episode sources, including revocation and DEV-only restrictions. Existing
-Episode and Evidence Selector logic is unchanged.
+Host-checked local stage reviews and registered verification results create
+signed Episode candidate references. Each reference preserves the checked
+snapshot and event boundary. Ordinary task endings and raw tool errors do not
+create candidates.
 
-`accumulation` reports member runs, distinct task count, raw tool-error count,
-authorized Episode references and native pattern references. It persists a
-derived `multitask_learning_index` in the same Host database. This index grants
-no authority and contains no copied raw transcripts or grading payloads.
-Native stage-group patterns are not proof of a common causal mechanism. Raw
-error counts include ordinary reproductions and are not capability gains.
-Existing `EvolutionEngine.evidence(pattern_id)` reads the accumulated native
-problem/Episode evidence; no task-specific excerpt selection is needed to make
-both tasks accessible to L1.
+At a later checkpoint, the embedding calls the collection's batch Curator.
+It reads the original DEV evidence, expands Episodes and saves any grounded
+Drafts. The same embedding can then submit those Drafts to the existing
+qualification path. See the [integration example](L1-COLLECTION-LEARNING-LINK.md).
+
+The accumulation index reports member runs, distinct task count, raw tool
+errors, stage candidates, authorized Episodes and native patterns. Inspection
+does not call a model. Patterns group observations and do not establish a
+common cause.
 
 CLI, using the same `--state-root` for every command:
 

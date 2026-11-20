@@ -42,13 +42,14 @@ async def test_single_failure_stage_survives_reads_and_preserves_exact_reference
 
 
 @pytest.mark.asyncio
-async def test_automatic_terminal_hook_and_ordinary_success_no_curator(tmp_path):
+async def test_unverified_terminal_handoff_does_not_create_learning_work(tmp_path):
     app,run=setup(tmp_path)
     try:
         # No writes or failures: scripted handoff is a LOW signal.
         await app.execute(run['id'])
         assert not app.store.values('l1_episode')
-        assert app.store.values('trace_manifest')
+        assert not app.store.values('trace_manifest')
+        assert not app.store.values('l1_stage_candidate')
         with app.store.connect() as c:assert not c.execute("SELECT 1 FROM jobs WHERE kind='L1_CURATE'").fetchone()
         assert app.provider.calls==1
     finally:app.close()
@@ -84,6 +85,8 @@ def test_denied_data_kept_out_of_episodes(tmp_path,visibility,reason,extra):
         app.runtime.end(run['id'],'PARTIAL',reason)
         assert EpisodeBuilder(app.store).capture_run(run['id'])==[]
         assert not app.store.values('l1_episode')
+        builder=EpisodeBuilder(app.store)
+        assert builder.capture_run(run['id'])==[]
         assert app.store.values('l1_triage_audit')[0]['priority']=='DENY'
     finally:app.close()
 
@@ -193,7 +196,7 @@ async def test_changed_or_deleted_raw_event_invalidates_episode(tmp_path):
     finally:app.close()
 
 @pytest.mark.parametrize('mode',['missing','corrupt','revoked'])
-def test_bad_artifact_denies_once_without_poisoning_observer_cursor(tmp_path,mode):
+def test_bad_artifact_denies_once_during_explicit_history_inspection(tmp_path,mode):
     app,run=setup(tmp_path)
     try:
         ref=app.store.blob('agent-visible output')
@@ -207,6 +210,8 @@ def test_bad_artifact_denies_once_without_poisoning_observer_cursor(tmp_path,mod
         app.runtime.end(run['id'],'PARTIAL','failure')
         assert Observer(app.store).consume()==[]
         assert not app.store.values('l1_episode')
+        builder=EpisodeBuilder(app.store)
+        assert builder.capture_run(run['id'])==[]
         assert app.store.values('l1_triage_audit')[0]['priority']=='DENY'
         assert Observer(app.store).consume()==[]
     finally:app.close()

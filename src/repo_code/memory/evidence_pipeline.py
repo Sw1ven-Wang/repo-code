@@ -94,8 +94,10 @@ def operation(store,event,run_id,c=None):
     try:
         row=c.execute('SELECT request FROM operations WHERE id=? AND run_id=?',(d.get('operation_id'),run_id)).fetchone()
         if row:args=json.loads(row['request'])['arguments']
-        if body.get('truncated') and body.get('result_artifact'):
-            ref=body['result_artifact']
+        if d.get('action_digest') and digest([d.get('tool_name'),args])!=d['action_digest']:
+            raise RepoError('EVIDENCE_DIGEST_CHANGED')
+        if body.get('truncated') and (body.get('result_artifact') or body.get('artifact')):
+            ref=body.get('result_artifact') or body['artifact']
             if not store.get('run_artifact',digest([run_id,ref]),c):raise RepoError('EVIDENCE_ARTIFACT_DENIED')
             body=store.read_json(ref)
         return args,body
@@ -210,7 +212,7 @@ def causal_segments(store,events,run_id,c=None):
     return segments,ordered,{'rule':'FILES_SYMBOLS_CHECK_IDENTITIES_V2_1','symbols':sorted(seed)[:200],'links':links}
 
 class EvidencePipeline:
-    VERSION='evidence-catalogue-v2.1-operation-evidence'
+    VERSION='evidence-catalogue-v2.2-local-check-windows'
     def __init__(self,owner):
         self.owner=owner;self.store=owner.repo.store;self.repo=owner.repo
 
@@ -292,7 +294,8 @@ class EvidencePipeline:
             if 'ENVIRONMENT_BLOCKER' in r:quality=10
             if 'created_content' in fields:
                 limitations.append('Assertions in created source are not proof they executed')
-            artifacts=[body[k] for k in ['result_artifact','artifact'] if isinstance(body.get(k),str) and re.fullmatch(r'sha256:[0-9a-f]{64}',body[k])]
+            artifacts=sorted({source[k] for source in (event['data'].get('result') or {},body) for k in ('result_artifact','artifact')
+                              if isinstance(source.get(k),str) and re.fullmatch(r'sha256:[0-9a-f]{64}',source[k])})
             for ref in artifacts:
                 self.repo.ensure_dev([ref]);self.store.read_blob(ref)
             summary=clipped(fields.get('command_summary',fields.get('path',tool)),650)
@@ -326,13 +329,18 @@ class EvidencePipeline:
         existing={role for record in records.values() for role in record['metadata']['role']}
         from ..context import SYSTEM
         policy=self.store.get('operator_config','learning_baseline_policy',default={})
-        public=self.store.get('operator_config','learning_public_task_context')
+        public=None if episode.get('stage_candidate_id') else self.store.get('operator_config','learning_public_task_context')
         if public is not None:public={k:public[k] for k in ['instance_id','repo','base_commit','problem_statement'] if k in public}
+        stage_verdict = {}
+        if episode.get('stage_candidate_id'):
+            stage_verdict = {'stage_outcome': episode['actual']['verified_stage'],
+                             'verification_kind': episode['actual']['verification_kind']}
+            stage_verdict['local_check_chains']=self._local_chains(episode,facts['events'],records)
         metadata=validate_metadata(dict(schema_version='curator-metadata-v2',episode_id=episode_id,
             trace_id=episode['trace_manifest_ref'],task_family=episode.get('task_family'),stage_type=episode['stage_type'],
-            task_status=episode['actual']['terminal_state'],event_ids=list(records),changed_files=sorted(changed),
+            task_status=episode['actual'].get('run_state_at_check', episode['actual']['terminal_state']),event_ids=list(records),changed_files=sorted(changed),
             verification_summary={'failed_processes':episode['actual']['failed_checks'],'trusted_recoveries':episode['actual']['recoveries'],
-                'authority':'OBSERVATIONS_ONLY_UNLESS_BOUND_CHECK','verification_incomplete':episode.get('verification_incomplete',True)},
+                **stage_verdict,'authority':'OBSERVATIONS_ONLY_UNLESS_BOUND_CHECK','verification_incomplete':episode.get('verification_incomplete',True)},
             environment_summary={'blocker_groups':len(groups),'environment_errors_do_not_prove_code_failure':True},
             cost_summary=episode['cost'],evidence_catalogue=[r['metadata'] for r in records.values()],
             missing_roles=[r for r in CORE_ROLES if r not in existing],public_task_context=public,
@@ -347,28 +355,103 @@ class EvidencePipeline:
             self.repo.derive(ref,[episode_id,*records],c)
         return metadata,records,ref
 
-    def select(self,records,max_bytes=24000):
+    def _local_chains(self,episode,events,records):
+        """Recheck signed stage links against original operations, not model-visible excerpts."""
+        from ..verified_stages import VerifiedStages
+        stages=VerifiedStages(self.owner.runtime);key=episode['stage_candidate_id']
+        row=self.store.get(stages.KIND,key)
+        if not row:raise RepoError('L1_STAGE_MISSING')
+        stage=stages.payload(row)
+        if (stage['id']!=key or stage['run_id']!=episode['run_id'] or stage['scope']!=episode['scope']
+                or stage['source_digest']!=episode['source_version']):raise RepoError('L1_STAGE_SCOPE')
+        pairs=stage.get('local_repair_pairs',[])
+        if not pairs:return []
+        by_op={e['data']['operation_id']:e for e in events if e['event_id'] in records}
+        def original(event,c):
+            d=event['data'];op=d['operation_id']
+            row=c.execute('SELECT request,result,approved_epoch FROM operations WHERE id=? AND run_id=?',
+                          (op,stage['run_id'])).fetchone()
+            if (not row or row['approved_epoch']!=stage['control_epoch'] or not row['result']
+                    or json.loads(row['result'])!=d['result']):raise RepoError('L1_STAGE_SOURCE_CHANGED')
+            args,body=operation(self.store,event,stage['run_id'],c)
+            if d.get('action_digest')!=digest([d['tool_name'],args]):raise RepoError('L1_STAGE_SOURCE_CHANGED')
+            return args,body
+        chains=[]
+        with contextlib.closing(self.store.connect()) as c:
+            for pair in pairs:
+                fail=by_op.get(pair['failed']);passed=by_op.get(pair['passed'])
+                if not fail or not passed:continue
+                if not (fail['sequence']<passed['sequence']<stage['sequence']
+                        and {pair['failed'],pair['passed']}<=set(stage['refs'])
+                        and pair['after']==stage['source_digest'] and pair['before']!=pair['after']):continue
+                def checked(e,source,success):
+                    args,body=original(e,c);probe=body.get('checked_probe')
+                    return (e['data']['tool_name']=='process.run'
+                        and (body.get('output_snapshot') or body.get('relevant_state'))==source
+                        and body.get('environment_digest')==episode['environment_digest']
+                        and digest(['linked_probe',probe] if probe else [args.get('argv'),args.get('stdin','')])==pair['check']
+                        and type(body.get('exit_code')) is int and (body['exit_code']==0)==success
+                        and not any(body.get(f) for f in ('timeout','cancelled','running')))
+                if not checked(fail,pair['before'],False) or not checked(passed,pair['after'],True):continue
+                self.repo.ensure_dev([key,pair['before'],pair['after']],c)
+                before=self.store.read_json(pair['before'])['files'];after=self.store.read_json(pair['after'])['files']
+                for edit in reversed(events):
+                    if not fail['sequence']<edit['sequence']<passed['sequence'] or edit['event_id'] not in records:continue
+                    if edit['data']['tool_name'] not in {'create','edit','patch'}:continue
+                    _,body=original(edit,c)
+                    if body.get('is_error') or not any(v and p in body.get('changed_paths',[]) and
+                            before.get(p,{}).get('blob')!=v==after.get(p,{}).get('blob') for p,v in body.get('versions',{}).items()):continue
+                    self.repo.ensure_dev([key,pair['before'],pair['after'],*(e['data']['operation_id'] for e in (fail,edit,passed))],c)
+                    chains.append({'failed':fail['event_id'],'change':edit['event_id'],'passed':passed['event_id'],
+                                   'check_digest':pair['check'],'authority':'LOCAL_SAME_CHECK_ONLY'})
+                    break
+        return chains
+
+    def select(self,records,max_bytes=24000,chains=()):
         if not 1024<=max_bytes<=48000:raise RepoError('EVIDENCE_BUDGET')
         chosen=[];used=0;covered=set();duplicates={d for r in records.values() for d in r['metadata']['duplicate_source_ids']}
-        order=[]
+        order=[chain[k] for chain in chains for k in ('failed','change','passed')]
         for role in CORE_ROLES:
             ranked=sorted([k for k,v in records.items() if role in v['metadata']['role'] and k not in duplicates],key=lambda k:(-records[k]['metadata']['quality'],records[k]['metadata']['event_sequence']))
             # Two complementary implementation/verification sources, rather than last exit 0.
             order.extend(ranked[:2] if role in {'IMPLEMENTATION_CHANGE','POSITIVE_VERIFICATION','ROOT_CAUSE_DIAGNOSIS'} else ranked[:1])
         order.extend(sorted(records,key=lambda k:(-records[k]['metadata']['quality'],records[k]['metadata']['event_sequence'])))
-        for sid in dict.fromkeys(order):
+        order=list(dict.fromkeys(order))
+        # Under pressure give each essential role a quotable selector before spending on context.
+        preferred=list(dict.fromkeys([*(chain[k] for chain in chains for k in ('failed','change','passed')),
+            *(next((i for i in order if role in records[i]['metadata']['role']),None) for role in CORE_ROLES)]))
+        preferred=[i for i in preferred if i is not None]
+        def view(sid,fields):
+            m=records[sid]['metadata']
+            return {'evidence_id':sid,'source_digest':m['content_digest'],'roles':m['role'],'selectors':fields}
+        full={sid:view(sid,{k:clipped(v,1600) for k,v in records[sid]['fields'].items()}) for sid in order}
+        tight=sum(len(canonical(full[i]))+1 for i in preferred)+2>max_bytes
+        order=list(dict.fromkeys(preferred+order))
+        for ix,sid in enumerate(order):
             if sid in duplicates:continue
-            record=records[sid];fields={k:clipped(v,1600) for k,v in record['fields'].items()}
-            source={'evidence_id':sid,'source_digest':record['metadata']['content_digest'],'roles':record['metadata']['role'],'selectors':fields}
-            size=len(canonical(source))
+            record=records[sid];source=full[sid]
+            available=max_bytes-used-(1 if chosen else 2)
+            share=available//max(1,len(preferred)-ix) if tight else available
+            if len(canonical(source))+1>share:
+                fields=record['fields']
+                keys=('new_hunk','created_content','diff_hunk','stderr_excerpt','stdout_excerpt','read_content','exit_status')
+                k=next((k for k in (*keys,*fields) if fields.get(k)),None)
+                if not k:continue
+                # Even when fair share is smaller than the envelope, try a minimal source.
+                length=min(1000,max(32,share-len(canonical(view(sid,{k:''})))-1))
+                source=view(sid,{k:clipped(fields[k],length)})
+                while len(canonical(source))+1>available and length>1:
+                    length//=2;source=view(sid,{k:clipped(fields[k],length)})
+                if not source['selectors'][k]:continue
+            size=len(canonical(source))+(1 if chosen else 2)
             if used+size>max_bytes:continue
             chosen.append(source);used+=size;covered.update(record['metadata']['role'])
         return chosen,{'bytes':used,'budget_bytes':max_bytes,'selected_ids':[x['evidence_id'] for x in chosen],
             'covered_roles':sorted(covered),'missing_roles':[r for r in CORE_ROLES if r not in covered],
-            'selection_version':'ROLE_COVERAGE_V2','role_labels_are_candidate_annotations':True}
+            'selection_version':'ROLE_COVERAGE_V3','budget_omissions':[i for i in preferred if i not in {s['evidence_id'] for s in chosen}],'role_labels_are_candidate_annotations':True}
 
     def expand(self,episode_id,records,request,attempt_id,max_bytes=8000):
-        if set(request)-{'evidence_id','selector','source_digest','symbol','max_bytes'}:raise RepoError('EVIDENCE_REQUEST_SCHEMA')
+        if set(request)-{'evidence_id','selector','source_digest','symbol','max_bytes','offset'}:raise RepoError('EVIDENCE_REQUEST_SCHEMA')
         sid=request.get('evidence_id');selector=request.get('selector');record=records.get(sid)
         if not record or selector not in record['metadata']['allowed_selectors']:raise RepoError('EVIDENCE_SELECTOR_DENIED')
         limit=request.get('max_bytes',2000)
@@ -378,16 +461,24 @@ class EvidencePipeline:
         EpisodeBuilder(self.store).get(episode_id);self.repo.ensure_dev([episode_id,sid,*record['metadata']['artifact_refs']])
         # Rebuild from immutable events + saved operation arguments, including on replay.
         _,fresh,_=self.build(episode_id)
-        if fresh[sid]['metadata']['content_digest']!=record['metadata']['content_digest']:raise RepoError('EVIDENCE_DIGEST_CHANGED')
-        text=record['fields'][selector]
+        if sid not in fresh or fresh[sid]['metadata']['content_digest']!=record['metadata']['content_digest']:raise RepoError('EVIDENCE_DIGEST_CHANGED')
+        record=fresh[sid];text=record['fields'][selector]
         if selector=='function_definition':
             symbol=request.get('symbol')
             if symbol not in record['definitions']:raise RepoError('EVIDENCE_SYMBOL_DENIED')
             text=record['definitions'][symbol]
         elif 'symbol' in request:raise RepoError('EVIDENCE_SELECTOR_DENIED')
+        field_start=record['fields'][selector].find(text) if selector=='function_definition' else 0
+        if field_start<0:raise RepoError('EVIDENCE_DIGEST_CHANGED')
+        offset=request.get('offset',0)
+        if type(offset) is not int or offset<0 or offset>len(text):raise RepoError('EVIDENCE_OFFSET')
+        content=text[offset:offset+limit].encode()[:limit].decode('utf8','ignore')
+        if not content and offset<len(text):raise RepoError('EVIDENCE_EXPANSION_BUDGET')
+        end=offset+len(content)
         value={'evidence_id':sid,'selector':selector,'source_digest':record['metadata']['content_digest'],
-            'content':clipped(text,limit),'content_bytes':len(text.encode()),'truncated':len(text.encode())>limit}
-        key=digest([attempt_id,sid,selector,request.get('symbol'),limit])
+            'content':content,'offset':offset,'field_offset':field_start+offset,'next_offset':end if end<len(text) else None,
+            'content_chars':len(text),'content_bytes':len(text.encode()),'truncated':offset>0 or end<len(text)}
+        key=digest([attempt_id,sid,selector,request.get('symbol'),limit,offset])
         with self.store.tx() as c:
             self.repo.ensure_dev([episode_id,sid],c)
             self.store.put('evidence_expansion',key,value,c,immutable=True);self.repo.derive(key,[episode_id,sid],c)

@@ -279,6 +279,9 @@ class ProcedurePromotion:
                 plan_report = await self._stage(job, 'PLAN', lambda: self._prepared_model(prepared_plan,source,context) if prepared_plan is not None else self._model(planner,
                     'Prepare a scoped, advisory Procedure candidate from the untrusted evidence. No tools. Return only JSON matching plan_schema. '
                     'Do not relearn tool syntax or infer validation success. Use only allowed_conditions as triggers/exclusions. '
+                    'Triggers are conjunctive preconditions at offer time. source_changed means THIS new task already edited its starting files, '
+                    'not that a historical fix changed code. For guidance needed before the first edit, do not require source_changed. '
+                    'Do not exclude source_changed merely because edits are expected: the workflow may need to verify its own change. '
                     'Keep scope/family implicit and unchanged. Extract an adaptable decision procedure; do not transplant the old patch, '
                     'source names, imports or regression literals into a different implementation. Preserve the observed causal mechanism and unknowns. '
                     'Produce a PORTABLE capability: binding_slots is required. Each slot declares kind path or argv and a semantic purpose. '
@@ -322,6 +325,7 @@ class ProcedurePromotion:
                     'Check binding_execution_contract: reject executable workflows inflated with prerequisite slot-discovery reads instead of learned post-binding decisions. '
                     'Reject incidental test-authoring constraints or baseline workflow obligations presented as a new capability; preserve the semantic verification requirements independently of file-authoring strategy. '
                     'Check source diagnosis AND implementation evidence, keep uncertainties; do not approve merely because a plan exists. '
+                    'Check temporal reachability: reject a first-edit workflow that requires the repair itself to have happened before it can be offered. '
                     'For portable plans reject task-specific filenames, literal test commands, fixed operator counts, support-answer leakage or unverified implementation assumptions in prose. '
                     'Review the generalization explicitly: historical file versions become provenance rather than runtime file requirements; current files must be read and rebound. Reject if correctness depends on those exact historical files. Semantic/environment preconditions remain required. '
                     'Slot purposes must explain how a new task discovers the relevant implementation and verification, not disguise a fixed script.',

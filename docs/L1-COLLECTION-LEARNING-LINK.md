@@ -1,19 +1,29 @@
 # Cross-task Draft promotion integration
 
-The trusted embedding calls `app.learning_pipeline(runner).advance(...)` after
-Episode curation. Raw observations, saved Drafts and runtime permissions remain
-separate states. A saved Draft alone never authorizes guidance injection.
+A finished local review or registered check saves a signed stage candidate in
+the same Host transaction as the verdict. Candidates preserve the checked
+snapshot, event boundary and evidence references. The Host batches the
+candidates later, for example between tasks. The Curator reads DEV operation
+evidence from each stage. Registered grader reports stay on the grading side.
+Verified stage curation uses the collection's own execution traces and skips
+historical seed lessons configured for legacy replay.
 
 ```python
-result = await app.learning_pipeline(isolated_trial_runner).advance(
+flow = app.learning_pipeline(isolated_trial_runner)
+batch = await flow.curate_stages(collection_id, curator_factory, max_stages=4)
+result = await flow.advance(
     collection_id,
     planner_factory,       # draft_id -> real compiler provider
     reviewer_factory,      # draft_id -> distinct semantic review provider
     validation_for,        # Draft -> {support_tasks, probes}, trusted Host only
-    draft_ids=[draft_id],
     base=frozen_operator_experiment_release,
 )
 ```
+
+The Curator factory receives the stage candidate ID. The batch records its
+results and resumes without redispatching completed Curator calls. By default
+promotion selects Drafts created from this collection's processed stages.
+Explicit Draft IDs still support review of saved legacy Drafts.
 
 The compiler and reviewer factories receive only the Draft identifier. The
 native promotion implementation constructs their evidence views. Validation
@@ -101,3 +111,37 @@ The repository ships no benchmark dataset. Embeddings supply their own local
 support tasks and probes. Memory v1 remains the default. Permanent publication
 continues through the existing independent transfer checks and Release gates;
 this API neither grants Release approval nor changes the active Release.
+# Nominating a draft by a shared mechanism
+
+The Host may use `repo_code.qualification_catalog.QualificationCatalog` when the
+task titles or dataset family labels do not describe the repair. Construct the
+catalog **before execution**, with a trusted set of public starting files per
+task, fixed source/support/target roles, and operator-defined mechanism rules.
+Use `catalog.family(task_id, initial_files)` for the existing session binding;
+do not retag old Episodes or signed grants.
+
+For example, “each item can be selected once” is a policy, **not** a diagnosis.
+A faulty implementation might count an item repeatedly or skip a free item at
+zero capacity. To select the first mechanism, combine the public policy with a
+Host-owned behavioral observation. Run a frozen public probe against the
+pristine task in the isolated sandbox. Bind its receipt to the rule's
+`observation` key (a digest of the probe specification), the complete initial
+file digest, and an explicit `MATCH` or `NO_MATCH`. An execution failure is
+never a match. Do not accept receipts supplied by a worker or infer them from
+the candidate answer. The controller owns probe execution and provenance; the
+catalog is not an oracle or an authenticator.
+
+After independent grading, call `nominate(draft, source_id, source_files=...,
+passed_sources=..., passed_supports=...)` for drafts traced to that source run.
+Only a nomination with independent, distinct, preassigned support may be
+passed to the native `learning_pipeline.advance` with those complete frozen
+support contracts and registered positive/negative/boundary probes. No grader
+materials belong in inputs to the worker. Unknown or ambiguous mechanisms get
+a task-local family; the same source or a copy of a held-out target is not
+eligible support. No matching rule, no draft, a rejected review or failed S2
+is a recorded outcome, not permission to inject a skill.
+
+Test the result on a separate forward task: record the signed session grant,
+the target's own application receipt and independent score, and check a
+negative task for unwanted offers. An application receipt is **not** evidence
+of a performance gain. This path never changes the permanent Release.

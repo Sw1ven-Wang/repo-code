@@ -75,6 +75,7 @@ Linux CI 保留完整 native 路径；Docker 和真实模型验证分别记录�
 - [Memory v2](docs/MEMORY_V2.md) · [Memory v2.1](docs/MEMORY_V21.md)
 - [跨任务累计](docs/multitask-learning.md) · [原生学习衔接](docs/L1-COLLECTION-LEARNING-LINK.md)
 - [Procedure 晋升](docs/procedure-promotion.md) · [通用能力绑定](docs/generic-capabilities.md) · [会话经验](docs/session-experience.md)
+- [Skill Impact v0.1](docs/SKILL_IMPACT.md)
 - [SWE-bench Adapter](integrations/swebench/README.md) · [Harbor 接入](integrations/harbor/README.md)
 - [持续任务控制器](integrations/continuous_memory/README.md) · [历史设计](docs/design/README.md)
 - [历史 README](docs/history/README-v1.5.1.md) · [安全边界](SECURITY.md)

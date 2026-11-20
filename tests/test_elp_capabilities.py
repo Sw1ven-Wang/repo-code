@@ -36,6 +36,74 @@ async def test_approved_offer_is_not_application_and_not_reinjected(tmp_path):
  finally:app.close()
 
 @pytest.mark.asyncio
+async def test_long_issue_matches_summary_before_building_scoped_guidance(tmp_path,monkeypatch):
+ app,run,owner=await initial(tmp_path)
+ try:
+  def procedure(value):value['procedure'].update(steps=['Inspect ZEPHYRQUARTZ_OMEGAPROBE output'])
+  source,_,decision=await learn(app,owner,run,change=procedure)
+  current,facts=approved_fixture(app,owner,source,decision)
+  router=CapabilityRouter(owner)
+  from repo_code.memory.retrieval import DynamicRetriever,EXPERIENCE_QUERY_CHAR_LIMIT
+  original=DynamicRetriever.rank_experiences
+  def rank(self,records,query,**options):
+   assert len(query)<=EXPERIENCE_QUERY_CHAR_LIMIT
+   assert all('ZEPHYRQUARTZ_OMEGAPROBE' not in row['text'] and 'sources' not in row for row in records)
+   return original(self,records,query,**options)
+  monkeypatch.setattr(DynamicRetriever,'rank_experiences',rank)
+  goal='Fix retention\n'+'Detail: reproduce the issue.\n'*900+'\nCheck RETENTION_RULE'
+  allowed=router.route(current['id'],goal,facts=facts)
+  assert len(allowed['guidance'])==1
+  hint=allowed['guidance'][0]
+  contract=app.store.get('capability_contract',hint['contract_ref'])
+  assert hint['steps']==['Inspect ZEPHYRQUARTZ_OMEGAPROBE output']
+  assert hint['exclusions']==contract['exclusions'] and hint['expected_outputs']==contract['expected_outputs']
+  assert contract['source_episode_refs'] and 'source_episode_refs' not in hint
+  assert owner.repo.get('retrieval_traces',allowed['retrieval_trace'])['match_view']=='DESCRIPTION_AND_TRIGGERS'
+  # Changing even the middle of the full goal must produce a new route.
+  changed=goal[:10000]+'Corrected detail'+goal[10000:]
+  assert router.route(current['id'],changed,facts=facts)['id']!=allowed['id']
+  def unexpected(*args,**kwargs):pytest.fail('a rejected hit must not build a contract')
+  monkeypatch.setattr(router,'contract',unexpected)
+  miss=router.route(current['id'],'ZEPHYRQUARTZ_OMEGAPROBE zirconium',facts=facts)
+  assert not miss['guidance'] and not miss['considered_contract_refs']
+  denied=router.route(current['id'],goal,facts={k:False for k in facts})
+  assert not denied['guidance'] and not denied['considered_contract_refs']
+ finally:app.close()
+
+@pytest.mark.asyncio
+async def test_long_hit_pages_only_while_pinned_and_applicable(tmp_path):
+ from repo_code.context import estimate_tokens
+ from repo_code.capabilities import _guidance_view
+ import json
+ app,run,owner=await initial(tmp_path)
+ try:
+  source,_,decision=await learn(app,owner,run,change=lambda v:v.update(text='ERROR_42 '+('detail '*180)))
+  current,facts=approved_fixture(app,owner,source,decision)
+  owner.profile=owner.profile.model_copy(update={'evidence_tokens':128})
+  router=CapabilityRouter(owner);rid=current['id']
+  args=dict(run_id=rid,purpose='runtime',match_only=True,facts=facts)
+  hits,_=owner.retrieve_experiences('ERROR_42',**args)
+  assert len(hits)==1 and hits[0]['view']=='REFERENCE_ONLY' and estimate_tokens(hits[0])<=128
+  hits,trace=owner.retrieve_experiences('ERROR_42',**args,token_budget=1)
+  assert not hits and owner.repo.get('retrieval_traces',trace)['budget_skips'][0]['reason']=='REFERENCE_EXCEEDS_BUDGET'
+  assert not owner.retrieve_experiences('ERROR_42',**args,token_budget=0)[0]
+  assert not owner.retrieve_experiences('xyznotamatch',**args)[0]
+  route=router.route(rid,'ERROR_42',facts=facts);g,=route['guidance'];ref=g['contract_ref']
+  assert g['view']=='REFERENCE_ONLY' and 'steps' not in g and route['potential_tokens']<=128
+  with pytest.raises(RepoError):router.read_offered(rid,ref,0,facts=facts)
+  receipt=router.mark_offered(route);assert not receipt['applied'] and not receipt['verified']
+  chunks=[];offset=0
+  while offset is not None:
+   page=router.read_offered(rid,ref,offset,facts=facts);chunks.append(page['content'])
+   assert estimate_tokens(page)<=128 and page['offset']==offset
+   offset=page['next_offset']
+  assert len(chunks)>1 and json.loads(''.join(chunks))==_guidance_view(app.store.get('capability_contract',ref))
+  with pytest.raises(RepoError):router.read_offered(rid,ref,0,facts={})
+  owner.repo.revoke(route['source_revisions'][0])
+  with pytest.raises(RepoError):router.read_offered(rid,ref,0,facts=facts)
+ finally:app.close()
+
+@pytest.mark.asyncio
 async def test_bound_operation_sequence_is_observed_but_not_verified(tmp_path):
  from test_review_workflow import tool
  app,run,owner=await initial(tmp_path)
@@ -81,7 +149,8 @@ async def test_agent_loop_offers_once_and_automatically_records_application(tmp_
  try:
   def change(v):v['procedure'].update(triggers=['source_changed'],exclusions=['run_cancelled'],steps=['Read source'])
   source,_,d=await learn(app,owner,run,change=change)
-  current,_=approved_fixture(app,owner,source,d,phases=['PLAN','EDIT','DEBUG','VERIFY','RESUME'],step_rules=[{'tool':'read','arguments_match':{'path':'a.py'}}])
+  current,_=approved_fixture(app,owner,source,d,goal='Review the RETENTION_RULE behavior',
+    phases=['PLAN','EDIT','DEBUG','VERIFY','RESUME'],step_rules=[{'tool':'read','arguments_match':{'path':'a.py'}}])
   app.broker.authorize_run(current['id'],True,True,delegate=False)
   await tool(app,current,'create',{'path':'changed.py','content':'x=1'},'pre-change')
   def reply(system,messages,tools,i):

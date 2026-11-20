@@ -135,16 +135,17 @@ async def test_reverted_draft_hands_off_focused_reproduction_once(tmp_path, appl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('case', ['fixed', 'unrelated', 'stale'])
+@pytest.mark.parametrize('case', ['fixed', 'long_fixed', 'unrelated', 'stale'])
 async def test_failed_check_requires_same_check_on_final_source(tmp_path, case):
     check = ['python', '-c', "from pathlib import Path; assert Path('fixed.py').read_text().strip() == 'value=1'"]
+    if case=='long_fixed':check[-1]="print(('log-line '*1900+'MIDDLE_LOCAL_OBSERVATION')*2+'log-line '*700); "+check[-1]
     replies = [action('draft', 'create', path='fixed.py', content='value=0\n'),
                action('failed-check', 'process.run', argv=check)]
     if case == 'stale':
         replies.append(action('unrelated-write', 'create', path='adjacent.py', content='marker=True\n'))
     replies.append({'text': 'The candidate is incomplete.'})
     first_review = len(replies)
-    if case == 'fixed':
+    if case in {'fixed','long_fixed'}:
         replies.extend([action('repair', 'edit', path='fixed.py', old_text='value=0', new_text='value=1'),
                         action('recheck', 'process.run', argv=check)])
     elif case == 'unrelated':
@@ -172,11 +173,68 @@ async def test_failed_check_requires_same_check_on_final_source(tmp_path, case):
     try:
         result = await app.execute(run['id'])
         state = result['candidate_review']
-        expected = {'fixed': 'NEW_CHECK_PASSED', 'unrelated': 'CHECK_FAILED', 'stale': 'RECHECK_PENDING'}
+        expected = {'fixed': 'NEW_CHECK_PASSED','long_fixed':'NEW_CHECK_PASSED', 'unrelated': 'CHECK_FAILED', 'stale': 'RECHECK_PENDING'}
         assert state['status'] == expected[case]
         assert 'Focused failed check' in prompts[first_review]
         assert json.dumps(check) in prompts[first_review]
-        assert bool(state['repaired_checks']) == (case == 'fixed')
+        assert bool(state['repaired_checks']) == (case in {'fixed','long_fixed'})
+        assert bool(state['local_repair_pairs']) == (case in {'fixed','long_fixed'})
+        if case in {'fixed','long_fixed'}:
+            pair,=state['local_repair_pairs']
+            assert pair['failed']!=pair['passed'] and pair['before']!=pair['after']
+            from repo_code.verified_stages import VerifiedStages
+            stages=VerifiedStages(app.runtime)
+            row,=[p for x in app.store.values(stages.KIND) if (p:=stages.payload(x)).get('local_repair_pairs')]
+            assert pair['failed'] in row['refs'] and pair['passed'] in row['refs']
+            if case=='long_fixed':
+                from repo_code.memory.evidence_pipeline import EvidencePipeline
+                from repo_code.memory.consolidation import Consolidator
+                from repo_code.memory.repository import MemoryRepository
+                from repo_code.memory.models import MemoryProfile
+                owner=Consolidator(MemoryRepository(app.store),app.runtime,MemoryProfile(mode='lexical_only'))
+                pipe=EvidencePipeline(owner);eid,=stages.materialize(row['id'])
+                meta,records,_=pipe.build(eid);chain,=meta.verification_summary['local_check_chains']
+                assert chain['check_digest']==pair['check'] and chain['authority']=='LOCAL_SAME_CHECK_ONLY'
+                sid=chain['passed'];assert len(records[sid]['fields']['stdout_excerpt'])>24000
+                selected,report=pipe.select(records,1024,[chain])
+                assert {chain[k] for k in ('failed','change','passed')}<=set(report['selected_ids'])
+                from repo_code.util import canonical,RepoError
+                assert len(canonical(selected))<=1024
+                req={'evidence_id':sid,'source_digest':records[sid]['metadata']['content_digest'],
+                     'selector':'stdout_excerpt','offset':30000,'max_bytes':64}
+                _,page=pipe.expand(eid,records,req,'test')
+                assert page['content']==records[sid]['fields']['stdout_excerpt'][30000:30064]
+                # Curator sees a small window, can obtain the middle, and cannot cite an unseen neighbor.
+                from test_curator_evidence_pipeline import provider
+                app.store.put('operator_config','curator_evidence_pipeline',{'enabled':True,'input_evidence_bytes':1024})
+                marker='MIDDLE_LOCAL_OBSERVATION'
+                middle=records[sid]['fields']['stdout_excerpt'].rindex(marker)
+                def answer(v,i):
+                    assert len(canonical(v['metadata']['evidence_catalogue']))<=1024
+                    assert v['metadata']['verification_summary']['local_check_chains']==[chain]
+                    visible=[s['selectors'].get('stdout_excerpt','') for s in v['evidence'] if s['evidence_id']==sid]
+                    if not i:
+                        assert not any(marker in text for text in visible)
+                        return {'status':'NEEDS_EVIDENCE','claims':[],'evidence_requests':[dict(req,offset=middle,max_bytes=len(marker))]}
+                    assert marker in visible
+                    def observation(quote):
+                        return {'category':'OBSERVATION','text':quote,'evidence_refs':[{
+                            'evidence_id':sid,'selector':'stdout_excerpt','source_digest':req['source_digest'],'quote':quote,'relation':'supports'}]}
+                    return {'status':'INCOMPLETE','claims':[observation(marker),observation(marker+'log-line')]}
+                p=provider(answer);report=await owner.curate_episode(eid,p)
+                assert report['status']=='INCOMPLETE' and p.calls==2
+                assert [x['action'] for x in report['receipts']]==['ADD','REJECT']
+                assert report['receipts'][1]['reason']=='CURATOR_QUOTE_UNSUPPORTED'
+                lesson=app.store.get('lesson',report['receipts'][0]['id'])
+                assert lesson['evidence_refs'][0]['match_start']==middle
+                # A DB row alone cannot override the original event / stage signature.
+                with app.store.tx() as c:
+                    saved=c.execute('SELECT result FROM operations WHERE id=?',(pair['passed'],)).fetchone()[0]
+                    c.execute('UPDATE operations SET result=? WHERE id=?',('{}',pair['passed']))
+                with pytest.raises(RepoError,match='L1_STAGE_SOURCE_CHANGED'):pipe.build(eid)
+                with app.store.tx() as c:c.execute('UPDATE operations SET result=? WHERE id=?',(saved,pair['passed']))
+                owner.repo.revoke(chain['change'])
+                with pytest.raises(RepoError):pipe.expand(eid,records,req,'test')
         assert app.provider.calls == len(replies)
         assert result['state'] == 'PARTIAL' and result['delivery'] is None
     finally:

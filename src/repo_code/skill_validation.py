@@ -106,6 +106,25 @@ class SkillValidator:
         self.store.put('skill_s1',digest([contract_ref,candidate_id]),report)
         return report
 
+    def _impact_view(self,report,candidate,stage,plan):
+        # The reference is a sidecar of the exact gate report. The stored gate
+        # report and its qualification digest are validated by existing readers.
+        from .skill_impact import compare_skill_pairs, persist_skill_impact
+        try:
+            impact=compare_skill_pairs(report['trials'],report['contract_ref'],candidate=candidate.id,
+                phase=stage,plan=plan,evidence_class=report['evidence_class'])
+            ref=persist_skill_impact(self.store,impact,report['trials'],plan)
+            self.store.put('skill_impact_stage',digest(report),{'impact_ref':ref},immutable=True)
+            return {**report,'impact_ref':ref}
+        except Exception as exc:
+            return {**report,'impact_collection_error':type(exc).__name__}
+
+    @staticmethod
+    def _impact_plan(stage,tasks,candidate,efficiency_metric):
+        from .skill_impact import impact_plan
+        try:return impact_plan(stage,tasks,candidate,efficiency_metric=efficiency_metric)
+        except Exception:return None
+
     async def s2(self,contract_ref,candidate_id,tasks,*,efficiency_metric=None):
         if efficiency_metric not in {None,'model_attempts','tool_calls','input_tokens','output_tokens'}:raise RepoError('SKILL_EFFICIENCY_METRIC')
         report=self.s1(contract_ref,candidate_id,tasks)
@@ -113,6 +132,7 @@ class SkillValidator:
         contract=CapabilityContract.model_validate(self.store.get('capability_contract',contract_ref))
         candidate=Candidate.model_validate(self.store.get('candidate',candidate_id))
         ids=sorted({self.store.get('skill_probe',pid)['spec']['task_id'] for pid in contract.required_probe_ids})
+        plan=self._impact_plan('S2',[tasks[i] for i in ids],candidate,efficiency_metric)
         trials=[];probe_reports=[]
         for task_id in ids:
             task=tasks[task_id]
@@ -141,7 +161,7 @@ class SkillValidator:
             'evidence_class':'INTEGRATION_ONLY' if any(t['provider_kind']=='scripted_test_double' for t in trials) else 'MODEL_TASK_EVALUATION'}
         self.store.put('skill_s2',digest([contract_ref,candidate_id]),report)
         self.store.put('candidate_state',candidate_id,{'state':'INTEGRATION_ONLY' if report['evidence_class']=='INTEGRATION_ONLY' else 'LOCAL_VALIDATED' if quality else 'SUPPORT_REPLAY_REJECTED','skill_report':digest(report)})
-        return report
+        return self._impact_view(report,candidate,'S2',plan)
 
     async def s3(self,contract_ref,candidate_id,tasks):
         prior=self.store.get('skill_s2',digest([contract_ref,candidate_id]))
@@ -161,6 +181,7 @@ class SkillValidator:
             family=task.get('capability_context',{}).get('task_family')
             if not family or (task['skill_role']=='TRANSFER' and family not in contract.task_families) or (task['skill_role']=='NEGATIVE' and family in contract.task_families):raise RepoError('SKILL_S3_FAMILY_BINDING')
         candidate=Candidate.model_validate(self.store.get('candidate',candidate_id));trials=[]
+        plan=self._impact_plan('S3',tasks,candidate,prior.get('predeclared_efficiency_metric'))
         for task in tasks:
             pair=[]
             for arm,release in [('A',candidate.base_release_digest),('B',candidate.candidate_release_digest)]:
@@ -196,4 +217,4 @@ class SkillValidator:
                 's1':digest(self.store.get('skill_s1',digest([contract_ref,candidate_id]))),
                 's2':digest(prior),'s3':digest(report),'evidence_class':report['evidence_class']}
             self.store.put('skill_qualification',candidate_id,{'payload':payload,'signature':self.store.sign(payload)},immutable=True)
-        return report
+        return self._impact_view(report,candidate,'S3',plan)

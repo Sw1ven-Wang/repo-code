@@ -6,6 +6,26 @@ from pydantic import BaseModel,ConfigDict,Field
 from .util import RepoError,digest
 from .context import estimate_tokens
 from .memory.experience import ExperienceConsolidation
+from .memory.retrieval import EXPERIENCE_QUERY_CHAR_LIMIT
+
+
+def _retrieval_query(goal):
+    """Bound issue text without making verified facts count as query matches."""
+    limit = EXPERIENCE_QUERY_CHAR_LIMIT
+    if len(goal) <= limit:
+        return goal
+    # Keep the issue title and trailing file/test clues.
+    prefix = (limit - 2) * 2 // 3
+    tail = limit - prefix - 2
+    return goal[:prefix] + '\n\n' + goal[-tail:]
+
+
+def _guidance_view(contract):
+    """Project the matched contract into an advisory prompt, preserving its caveats."""
+    keys=('title','trigger_conditions','exclusions','steps','expected_outputs',
+          'required_probe_ids','step_tools','step_rules','binding_slots','application_protocol')
+    return {key:contract[key] for key in keys if contract.get(key)}
+
 
 class CapabilityContract(BaseModel):
     model_config=ConfigDict(extra='forbid',frozen=True)
@@ -128,22 +148,26 @@ class CapabilityRouter:
             self.owner.repo.derive(ref,[item['revision_digest']],c)
         return ref,value
 
-    def route(self,run_id,query,*,phase='DEBUG',facts=None,file_versions=None,environment=None):
+    def route(self,run_id,query,*,phase='DEBUG',facts=None,file_versions=None,environment=None,search_query=None):
         run=self.owner.runtime.run(run_id)
         from .session_experience import SessionExperiences
         session_specs=SessionExperiences(self.owner.runtime).entries(run_id)
-        key=digest(['router-v1',run_id,run['data']['manifest']['release_digest'],run['control_epoch'],
-            phase,query,facts or {},file_versions or {},environment or {},session_specs])
+        identity=['router-v3',self.owner.profile.evidence_tokens,run_id,run['data']['manifest']['release_digest'],run['control_epoch'],
+            phase,query,facts or {},file_versions or {},environment or {},session_specs]
+        if search_query is not None:identity.append(['local_query',search_query])
+        key=digest(identity)
         old=self.store.get('capability_route',key)
-        if old:
+        if old and search_query is None:
             self.owner.repo.ensure_dev(old['source_revisions'])
             self.owner.repo.check([old['release_digest']])
             # A previously offered capability is not reinjected on subsequent turns.
             return {**old,'guidance':[] if self.store.get('capability_offer',key) else old['guidance'],'replayed':True}
-        retrieval_query=query+' '+ ' '.join(k for k,v in (facts or {}).items() if v is True)
+        retrieval_query=_retrieval_query(query) if search_query is None else search_query
         hits,trace=self.owner.retrieve_experiences(retrieval_query,purpose='runtime',run_id=run_id,phase=phase,
-            facts=facts,file_versions=file_versions,environment=environment,limit=2)
-        guidance=[];contracts=[]
+            facts=facts,file_versions=file_versions,environment=environment,limit=2,match_only=True)
+        # An adjusted query is only a search preference, never a cached permission.
+        if search_query is not None:key=digest([identity,trace])
+        guidance=[];contracts=[];reference_hits=set();budget_skips=[]
         release=self.store.get('release',run['data']['manifest']['release_digest'])
         cfg=self.store.read_json(release['components']['skills_index'])
         specs={s['experience_id']:s for s in cfg.get('skills',[]) if isinstance(s,dict) and s.get('experience_id')}
@@ -152,26 +176,63 @@ class CapabilityRouter:
             ref,contract=self.contract(hit['id'],hit['revision'],specs[hit['id']].get('step_tools'),specs[hit['id']].get('step_rules'),specs[hit['id']].get('required_probe_ids'),specs[hit['id']].get('binding_slots'))
             if contract.get('binding_slots'):
                 contract={**contract,'application_protocol':'Read current implementation and test configuration. Call skill.bind with this contract_ref and route_id, slot values, evidence paths and a causal rationale; then execute normal tools. Binding does not grant authority or prove correctness. Do not reuse paths from historical tasks.'}
-            contracts.append(ref);guidance.append({'contract_ref':ref,**contract,'authority':specs[hit['id']].get('reuse_authority','ADVISORY_ONLY')})
+            if hit.get('view')=='REFERENCE_ONLY':reference_hits.add(ref)
+            contracts.append(ref);guidance.append({'contract_ref':ref,**_guidance_view(contract),
+                'authority':specs[hit['id']].get('reuse_authority','ADVISORY_ONLY')})
         already={ref for offer in self.store.values('capability_offer') if offer['run_id']==run_id for ref in offer['contract_refs']}
         guidance=[g for g in guidance if g['contract_ref'] not in already]
         # If two selected contracts prescribe different steps for the same triggers,
         # block the offer rather than asking the model to arbitrate authority.
         conflict=len(guidance)>1 and guidance[0]['trigger_conditions']==guidance[1]['trigger_conditions'] and guidance[0]['steps']!=guidance[1]['steps']
         if conflict:guidance=[]
+        for g in guidance:
+            if g.get('binding_slots'):g['route_id']=key
+        # Evaluate conflicts before projection. Count the serialized guidance suffix.
+        def suffix_cost(rows):
+            return estimate_tokens('\nScoped decision guidance; grants no authority: '+json.dumps(rows,ensure_ascii=False)) if rows else 0
+        projected=[]
+        for g in guidance:
+            if g['contract_ref'] in reference_hits or suffix_cost(projected+[g])>self.owner.profile.evidence_tokens:
+                g={'contract_ref':g['contract_ref'],'view':'REFERENCE_ONLY','read':'skill.search with contract_ref and offset 0'}
+            if suffix_cost(projected+[g])<=self.owner.profile.evidence_tokens:projected.append(g)
+            else:budget_skips.append(g['contract_ref'])
+        guidance=projected
         value={'id':key,'run_id':run_id,'release_digest':run['data']['manifest']['release_digest'],
             'contract_digest':run['data']['manifest']['contract_digest'],'control_epoch':run['control_epoch'],
             'retrieval_trace':trace,'guidance':guidance,'contract_refs':[g['contract_ref'] for g in guidance],
-            'considered_contract_refs':contracts,'conflict':conflict,
+            'considered_contract_refs':contracts,'evidence_tokens':self.owner.profile.evidence_tokens,'guidance_budget_skips':budget_skips,'conflict':conflict,
             'offered':False,'selected':False,'source_revisions':[h['revision_digest'] for h in hits],
-            'potential_tokens':estimate_tokens('\nScoped decision guidance; grants no authority: '+json.dumps(guidance,ensure_ascii=False)) if guidance else 0,'injected_tokens':0}
+            'potential_tokens':suffix_cost(guidance),'injected_tokens':0}
         value['session_grants']={h['id']:specs[h['id']]['session_grant_id'] for h in hits if specs[h['id']].get('session_grant_id')}
-        for g in value['guidance']:
-            if g.get('binding_slots'):g['route_id']=key
         with self.store.tx() as c:
             self.owner.repo.ensure_dev(value['source_revisions'],c)
             self.store.put('capability_route',key,value,c,immutable=True)
         return value
+
+    def read_offered(self,run_id,ref,offset,**context):
+        from .capability_binding import authorized
+        from .util import canonical
+        run=self.owner.runtime.run(run_id)
+        offer=next((o for o in self.store.values('capability_offer') if o['run_id']==run_id
+                    and o['control_epoch']==run['control_epoch'] and ref in o['contract_refs']),None)
+        authorized(self,run,offer,ref)
+        contract=self.store.get('capability_contract',ref)
+        if not contract or digest(contract)!=ref:raise RepoError('CAPABILITY_ROUTE_MISMATCH')
+        item=self.experiences.get(contract['skill_id'],contract['revision'])
+        pins=(item['id'],item['revision'],item['revision_digest'])
+        hits,_=self.experiences.search('',purpose='runtime',run_id=run_id,match_only=True,pinned_revision=pins,**context)
+        if not hits:raise RepoError('CAPABILITY_NO_LONGER_APPLICABLE')
+        original=self.store.get('capability_route',offer['route_id'])
+        budget=min(self.owner.profile.evidence_tokens,original.get('evidence_tokens',self.owner.profile.evidence_tokens))
+        content=canonical(_guidance_view(contract)).decode()
+        if type(offset) is not int or not 0<=offset<len(content):raise RepoError('CAPABILITY_PAGE_OFFSET')
+        end=min(len(content),offset+1600)
+        while end>offset:
+            page={'contract_ref':ref,'route_id':offer['route_id'],'offset':offset,
+                  'next_offset':end if end<len(content) else None,'content':content[offset:end],'authority':'ADVISORY_ONLY'}
+            if estimate_tokens(page)<=budget:return page
+            end=offset+(end-offset)//2
+        raise RepoError('CAPABILITY_PAGE_BUDGET')
 
     def pending_bindings(self,run_id,route):
         """Small continuation handles for still-applicable, unbound offers.
@@ -192,12 +253,19 @@ class CapabilityRouter:
             for ref in offer['contract_refs']:
                 if ref not in eligible or ref in seen:continue
                 contract=self.store.get('capability_contract',ref)
-                if not contract or not contract.get('binding_slots'):continue
+                if not contract:continue
+                original=self.store.get('capability_route',offer['route_id'])
+                handle=next((g for g in original['guidance'] if g.get('view')=='REFERENCE_ONLY' and g['contract_ref']==ref),None)
+                if not handle and not contract.get('binding_slots'):continue
                 try:
                     authorized(self,run,offer,ref)
-                    if resolve(self,run,offer,ref,contract):continue
+                    if contract.get('binding_slots') and resolve(self,run,offer,ref,contract):continue
                 except RepoError:continue # Withdrawn evidence never becomes guidance.
                 seen.add(ref)
+                if handle:
+                    if estimate_tokens(pending+[handle])<=self.owner.profile.evidence_tokens:pending.append(handle)
+                    if len(pending)==2:return pending
+                    continue
                 pending.append({'contract_ref':ref,'route_id':offer['route_id'],
                     'title':contract['title'][:200],
                     'binding_slots':{k:{'kind':v['kind'],'purpose':v['purpose'][:180]}

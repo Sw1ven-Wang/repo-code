@@ -255,8 +255,8 @@ async def test_decoded_newlines_quotes_and_different_source_quotes_are_grounded(
 async def test_host_fallback_supplies_known_but_undelivered_role(tmp_path,monkeypatch):
     app,run,old,eid,owner,ids=await prepared(tmp_path)
     calls=[];original=EvidencePipeline.select
-    def limited(self,records,max_bytes):
-        sources,report=original(self,records,max_bytes)
+    def limited(self,records,max_bytes,chains=()):
+        sources,report=original(self,records,max_bytes,chains)
         sources=[s for s in sources if 'BOUNDARY_COUNTEREXAMPLE' not in s['roles']]
         return sources,report
     monkeypatch.setattr(EvidencePipeline,'select',limited)

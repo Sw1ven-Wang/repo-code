@@ -1,0 +1,7 @@
+{
+  "planning_policy": {
+    "kind": "config",
+    "verify_before_finish": true,
+    "instructions": "For a Host-offered, eligible procedure, make the adoption decision before the FIRST mutating call. Inspect the present task and only the prerequisites needed for binding. If the procedure does not fit, state the specific mismatch and work independently. If it fits, the next call after prerequisite inspection is skill.bind, without combining it with an edit. Read the successful bind result before planning the change. Treat its bound_step_rules as an ordered checklist: start at its first rule after binding, including any required inspection, then use the observed files and arguments for the remaining actions in order. Pre-binding reads do not fulfill post-binding inspections. If a step is invalid or unsafe, stop using the procedure and state why. Never redo an already completed edit to create a receipt. Without an eligible offer, work normally."
+  }
+}

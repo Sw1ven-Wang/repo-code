@@ -54,6 +54,7 @@ def work_status(store, runtime, run, *, snapshot=None, files=None, review_after=
     baseline_check_failure = None
     baseline_reproduction = None
     check_failures = {}
+    local_failures = {}
     rows = operation_rows(store, run['id'])
     for row in rows:
         request = json.loads(row['request']); args = request['arguments']; tool = request['tool_name']
@@ -131,6 +132,9 @@ def work_status(store, runtime, run, *, snapshot=None, files=None, review_after=
                 continue
             ref = body.get('checked_probe')
             key = digest(['linked_probe', ref] if ref else [argv, args.get('stdin', '')])
+            if (review_after is not None and same_epoch and validation['complete'] and observed
+                    and validation['outcome']=='FAILED' and body.get('environment_digest')==runtime.sandbox.environment_digest):
+                local_failures[key]=validation
             if (review_after is not None and not ref and validation['same_control_epoch']
                     and validation['complete'] and observed and observed != baseline_digest
                     and body.get('environment_digest') == runtime.sandbox.environment_digest
@@ -184,6 +188,12 @@ def work_status(store, runtime, run, *, snapshot=None, files=None, review_after=
             'repair_checks': repairs,
             'pending_repairs': pending_repairs,
             'repaired_checks': list(repaired.values()),
+            # Evidence, not a verdict: a later run on another task still needs qualification.
+            'local_repair_pairs': [{'check':key,'failed':f['operation'],'passed':checks[key]['operation'],
+                                    'before':f['source_digest'],'after':current}
+                for key,f in local_failures.items() if key in checks and checks[key]['complete']
+                and checks[key]['outcome']=='PASSED' and f['source_digest']!=current
+                and f['operation_sequence']<checks[key]['operation_sequence']][-4:],
             'required_probes': list(selected),
             'pending_probes': [{**{k: p[k] for k in ('operation', 'probe', 'stdout_excerpt', 'print_arity')},
                                 'outcome': checked_probes.get(ref)}

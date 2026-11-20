@@ -72,9 +72,6 @@ class Observer:
                             if pattern["status"] != "COOLDOWN": pattern["status"] = "ELIGIBLE_FOR_TRIAGE"
                             self.store.put("pattern", pattern_id, pattern,c)
                             new.append(pattern_id)
-            from .episodes import EpisodeBuilder
-            if event["type"] in EpisodeBuilder.TRIGGERS:
-                EpisodeBuilder(self.store).capture_run(run, through=event["sequence"], c=c)
             cursor = event["sequence"]
             self.store.put("observer", "cursor", {"sequence": cursor},c)
         return list(dict.fromkeys(new))

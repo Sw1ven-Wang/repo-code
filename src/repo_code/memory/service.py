@@ -690,15 +690,8 @@ class MemoryService:
         job=self.jobs.claim(job["id"])
         if job is None:return
         head=self.repo.get("snapshot_heads",job["scope"])
-        claims=self.consolidator.terminal_claim(run_id)
-        claims+=self.consolidator.file_observations(run_id)
-        if self.profile.semantic_consolidation and run['state']!='CANCELLED':
-            try:
-                from ..episodes import EpisodeBuilder
-                for episode_id in EpisodeBuilder(self.store).capture_run(run_id):
-                    await self.consolidator.curate_episode(episode_id,self.provider)
-            except Exception as exc:
-                self.repo.put("memory_control",uid("consolidation-failure-"),{"run_id":run_id,"code":getattr(exc,"code",type(exc).__name__),"observation_preserved":True})
+        # Task experience is now derived from verified stages in the later Curator batch.
+        claims=self.consolidator.file_observations(run_id)
         if claims:self.consolidator.commit(claims,job,self.jobs,head)
         else:
             with self.store.tx() as c:self.jobs.finish(job,[],c)
@@ -722,46 +715,6 @@ class MemoryService:
                 with self.store.tx() as c:self.jobs.finish(job,[],c)
         except Exception as exc:
             self.repo.put('memory_control',uid('correction-failure-'),{'run_id':run_id,'code':getattr(exc,'code',type(exc).__name__)})
-
-    async def on_verified_stage(self,run_id,decision):
-        """A Host check can close a stage without certifying the entire task."""
-        if not self.profile.learning_enabled:return
-        self.assert_run_profile(run_id)
-        run=self.runtime.run(run_id)
-        if run['data']['visibility']!='DEV' or run['state']!='RUNNING':return
-        data=decision.model_dump(mode='json')
-        if self.store.get('decision',decision.intent_digest)!=data or not self.store.verify(
-                decision.model_dump(mode='json',exclude={'signature'}),decision.signature):
-            raise RepoError('UNTRUSTED_DECISION')
-        intent=self.store.get('intent',decision.intent_digest)
-        if not intent or intent['run_id']!=run_id or intent['source_digest']!=self.runtime.workspace(run).snapshot():
-            raise RepoError('STAGE_SOURCE_CHANGED')
-        evidence=[self.store.get('evidence',key) for key in decision.evidence_ids]
-        if not any(row and row['status']=='PASSED' for row in evidence):return
-        from .models import ClaimRecord,EvidenceRef
-        payload={'intent':decision.intent_digest,'source_digest':intent['source_digest'],
-                 'checks':[{k:row[k] for k in ('id','check_id','status')} for row in evidence if row],
-                 'coverage':'registered_checks_only','task_delivery_verified':False}
-        marker='stage:'+run_id+':'+decision.intent_digest
-        event=self.repo.get('memory_control',marker)
-        if not event:
-            with self.store.tx() as c:
-                sequence=self.store.emit(c,run_id,'memory.stage_observed',payload,'DEV')
-                event=dict(c.execute('SELECT * FROM events WHERE sequence=?',(sequence,)).fetchone())
-                event['data']=json.loads(event['data'])
-                self.repo.put('memory_control',marker,event,c)
-        ref=EvidenceRef(source_kind='verification',source_id=event['event_id'],content_digest=digest(event['data']),
-            run_id=run_id,scope_id=run['data']['manifest']['scope'],visibility_domain='DEV',origin_class='HOST_OBSERVATION',
-            observed_at=event['created'],selector={'type':'json_pointer','value':''})
-        claim=ClaimRecord(claim_id='stage-'+digest([run_id,decision.intent_digest])[7:31],kind='EPISODE',
-            text='Stage check observation: '+canonical(payload).decode(),scope_id=ref.scope_id,support_refs=[ref],
-            derived_from=[run_id,decision.intent_digest,*decision.evidence_ids,ref.source_id],epistemic_status='OBSERVED',
-            validity='HISTORICAL',lifecycle='ACTIVE' if self.profile.auto_activate_observations else 'CANDIDATE',
-            independent_support=[run['task_id']])
-        job=self.jobs.enqueue(ref.scope_id,run_id,digest(self.history.records(run_id)),self.profile_digest,'STAGE:'+decision.intent_digest,
-            {'control':run['control_epoch'],'writer':run['writer_epoch'],'revocation':self.repo.epoch()})
-        job=self.jobs.claim(job['id'])
-        if job:self.consolidator.commit([claim],job,self.jobs,self.repo.get('snapshot_heads',ref.scope_id))
 
     def close(self):
         if self.encoder and self.owns_encoder:self.encoder.close()
